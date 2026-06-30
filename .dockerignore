@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.git/
+plan.json
+.env
+scripts/
+tests/
+k8s.yaml
+docker-compose.yml

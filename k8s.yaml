@@ -1,0 +1,113 @@
+# Multi-node rollout.
+#   - DaemonSet: one Syncthing per worker node, mounting that node's GPUStack
+#     model cache (the SAME path the worker uses).
+#   - Deployment: the single orchestrator + its Service.
+#
+# Create the shared API key first:
+#   kubectl -n gpustack create secret generic modelsync \
+#     --from-literal=syncthing-api-key=<shared> --from-literal=gpustack-token=<token> \
+#     --from-literal=auth-token=<orchestrator-api-token>
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: modelsync-syncthing
+  namespace: gpustack
+spec:
+  selector:
+    matchLabels: { app: modelsync-syncthing }
+  template:
+    metadata:
+      labels: { app: modelsync-syncthing }
+    spec:
+      # Data port 22000 between nodes, GUI 8384 to the orchestrator.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # Only land on GPUStack worker nodes (adjust to your label).
+      nodeSelector: { gpustack.io/worker: "true" }
+      containers:
+        - name: syncthing
+          image: syncthing/syncthing:1
+          env:
+            - name: STGUIADDRESS
+              value: 0.0.0.0:8384
+            - name: STNODEFAULTFOLDER
+              value: "1"
+            - name: PUID
+              value: "0"
+            - name: PGID
+              value: "0"
+            - name: STGUIAPIKEY
+              valueFrom:
+                secretKeyRef: { name: modelsync, key: syncthing-api-key }
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: model-cache
+              mountPath: /var/lib/gpustack/cache
+            - name: identity
+              mountPath: /var/syncthing
+      volumes:
+        # The node's own GPUStack model cache. hostPath if the worker uses a
+        # host dir; swap to the worker's PVC if it uses one instead.
+        - name: model-cache
+          hostPath:
+            path: /var/lib/gpustack/cache
+            type: DirectoryOrCreate
+        # Persist device identity per node.
+        - name: identity
+          hostPath:
+            path: /var/lib/modelsync-syncthing
+            type: DirectoryOrCreate
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: modelsync-orchestrator
+  namespace: gpustack
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: modelsync-orchestrator }
+  template:
+    metadata:
+      labels: { app: modelsync-orchestrator }
+    spec:
+      containers:
+        - name: orchestrator
+          image: gpustack-modelsync:0.1.0
+          ports:
+            - containerPort: 8585
+          env:
+            - name: MODELSYNC_GPUSTACK_URL
+              value: http://gpustack:80
+            - name: MODELSYNC_STATE_DIR
+              value: /data
+            - name: MODELSYNC_GPUSTACK_TOKEN
+              valueFrom:
+                secretKeyRef: { name: modelsync, key: gpustack-token }
+            - name: MODELSYNC_SYNCTHING_API_KEY
+              valueFrom:
+                secretKeyRef: { name: modelsync, key: syncthing-api-key }
+            - name: MODELSYNC_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef: { name: modelsync, key: auth-token }
+          volumeMounts:
+            - name: state
+              mountPath: /data
+      volumes:
+        # plan + registry + members. A PVC keeps automation state across
+        # reschedules; emptyDir is fine if you can re-apply the plan after a move.
+        - name: state
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: modelsync
+  namespace: gpustack
+spec:
+  selector: { app: modelsync-orchestrator }
+  ports:
+    - port: 8585
+      targetPort: 8585

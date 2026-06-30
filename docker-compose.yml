@@ -1,0 +1,58 @@
+# Two roles, two lifecycles:
+#   orchestrator  -> run ONCE, anywhere that can reach GPUStack + worker GUIs
+#   syncthing     -> run on EVERY worker host (one per node). On a real cluster
+#                    you deploy this service per worker; use k8s.yaml (DaemonSet)
+#                    for a true multi-node rollout.
+#
+# Set in a .env next to this file:
+#   GPUSTACK_TOKEN=...        SYNCTHING_API_KEY=...   (one shared key, all nodes)
+#   GPUSTACK_URL=http://gpustack-server:80
+
+services:
+  orchestrator:
+    build: .
+    image: gpustack-modelsync:0.1.0
+    environment:
+      MODELSYNC_GPUSTACK_URL: ${GPUSTACK_URL:-http://gpustack-server:80}
+      MODELSYNC_GPUSTACK_TOKEN: ${GPUSTACK_TOKEN}
+      MODELSYNC_SYNCTHING_API_KEY: ${SYNCTHING_API_KEY}
+      # required: the API mutates the cluster. :? fails the deploy if unset
+      # rather than silently exposing an open control plane.
+      MODELSYNC_AUTH_TOKEN: ${AUTH_TOKEN:?set AUTH_TOKEN in .env}
+      MODELSYNC_STATE_DIR: /data
+    volumes:
+      - orchestrator-state:/data   # plan + registry + members survive restarts
+    ports:
+      - "8585:8585"
+    restart: unless-stopped
+
+  syncthing:
+    image: syncthing/syncthing:1
+    # Host net: data port 22000 must reach peer workers, GUI 8384 the orchestrator.
+    network_mode: host
+    environment:
+      STGUIAPIKEY: ${SYNCTHING_API_KEY}
+      STGUIADDRESS: 0.0.0.0:8384
+      STNODEFAULTFOLDER: "1"
+      # Run as root so it can read/write GPUStack's cache files regardless of
+      # their owner. ponytail: simplest; match GPUStack's uid instead to harden.
+      PUID: "0"
+      PGID: "0"
+    volumes:
+      # SAME volume the GPUStack worker uses, mounted at the SAME absolute path
+      # GPUStack reports in ModelFile.local_dir (the orchestrator uses those paths
+      # verbatim). If GPUStack made a named volume, reference it external below;
+      # if it uses a host bind, swap to:  - /host/path/cache:/var/lib/gpustack/cache
+      - gpustack-cache:/var/lib/gpustack/cache
+      # Syncthing's own identity (device id) must persist across restarts.
+      - syncthing-config:/var/syncthing
+    restart: unless-stopped
+
+volumes:
+  orchestrator-state:
+  gpustack-cache:
+    # Reuse GPUStack's existing model-cache volume; do NOT let compose create a
+    # new empty one. Set `name:` to the actual volume (docker volume ls).
+    external: true
+    name: gpustack-data
+  syncthing-config:
