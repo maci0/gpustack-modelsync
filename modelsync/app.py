@@ -17,7 +17,7 @@ from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from .config import settings
-from .gpustack import GPUStackClient, ModelFolder, Worker, free_for_path
+from .gpustack import GPUStackClient, Worker, free_for_path
 from .reconcile import collect_status, folder_id, pick_source, reconcile
 from .syncthing import SyncthingClient
 from .web import PAGE, SCRIPT, USERSCRIPT

@@ -118,7 +118,6 @@ async def test_unconfirmed_source_never_reverts():
     # no GPUStack-confirmed holder -> source is completion-inferred -> we must NOT
     # revert replicas toward it (could wipe a real copy toward a guess).
     path = "/c/m"
-    fid = folder_id(path)
     workers = [W(1), W(2)]
     fakes = {1: FakeSync("DEV1", compl=100), 2: FakeSync("DEV2", compl=50, diverged=999)}
     await reconcile({path: {1, 2}}, workers, make(fakes), have={})  # no confirmed holder

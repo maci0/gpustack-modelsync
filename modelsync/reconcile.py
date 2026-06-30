@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
-from typing import Awaitable, Callable
+from typing import Callable
 
 import httpx
 
