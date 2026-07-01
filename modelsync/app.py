@@ -18,7 +18,7 @@ from pydantic import BaseModel
 
 from .config import settings
 from .gpustack import GPUStackClient, Worker, free_for_path
-from .reconcile import collect_status, folder_id, pick_source, reconcile
+from .reconcile import _choose_source, collect_status, folder_id, reconcile
 from .syncthing import SyncthingClient
 from .web import PAGE, SCRIPT, USERSCRIPT
 
@@ -483,19 +483,24 @@ async def reset(body: ResetIn) -> dict:
         by_id = {w.id: w for w in workers}
         folders = await state.gpustack.model_folders()
         have = {f.path: set(f.current_nodes) for f in folders}
-        targets = {t for t in state.plan.get(path, set()) if (w := by_id.get(t)) and w.syncable}
-        src = pick_source(targets, have.get(path, set()))  # confirmed holder only
+        targets = sorted(t for t in state.plan.get(path, set()) if (w := by_id.get(t)) and w.syncable)
+        fid = folder_id(path)
+        # Integrity-first source (same as reconcile): a CLEAN verified copy, not
+        # just the lowest GPUStack holder — never override from a poisoned node.
+        status: dict[int, dict | None] = {}
+        for t in targets:
+            try:
+                status[t] = await client_for(by_id[t]).folder_status(fid)
+            except httpx.HTTPError:
+                status[t] = None
+        src = _choose_source(targets, have.get(path, set()), status)
         if src is None:
             return {"ok": False, "error": "no reachable source node holds this model"}
-        fid = folder_id(path)
-        replicas = [t for t in sorted(targets) if t != src]
+        replicas = [t for t in targets if t != src]
         actions: list[str] = []
 
-        # Source completion gates BOTH override and revert. Unknown -> 0.0.
-        try:
-            src_compl = (await client_for(by_id[src]).folder_status(fid))["completion"]
-        except httpx.HTTPError:
-            src_compl = 0.0
+        # Source completion gates override (reuse the status already fetched).
+        src_compl = (status[src] or {}).get("completion", 0.0)
         # override forces the source's content cluster-wide, bypassing the revert
         # guards — only do it when the source is actually complete, else it could
         # propagate an empty/stale source and wipe good replicas.

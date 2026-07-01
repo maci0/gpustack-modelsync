@@ -234,8 +234,3 @@ async def collect_status(
     return out
 
 
-def pick_source(targets: set[int], have: set[int]) -> int | None:
-    """Source for /reset and tests: a confirmed holder only (lowest id), never a
-    non-holder — reset must not promote an empty node to authoritative."""
-    holders = targets & have
-    return min(holders) if holders else None

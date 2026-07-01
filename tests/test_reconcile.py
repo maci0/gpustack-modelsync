@@ -1,7 +1,7 @@
 """Reconcile is the non-trivial logic: source choice, revert-safety, GC."""
 
 from modelsync.gpustack import Worker
-from modelsync.reconcile import folder_id, pick_source, reconcile
+from modelsync.reconcile import _choose_source, folder_id, reconcile
 
 
 class FakeSync:
@@ -167,7 +167,16 @@ async def test_folder_id_collision_resistant():
     assert folder_id("/x/Model.v2-Q4") == folder_id("x/Model.v2-Q4/")  # trims edges
 
 
-def test_pick_source_holder_only():
-    assert pick_source({1, 2, 3}, {2, 3}) == 2   # lowest confirmed holder
-    assert pick_source({1, 2}, set()) is None     # no holder -> None (never empty node)
-    assert pick_source(set(), {1}) is None
+def test_choose_source_prefers_clean_then_confirmed():
+    clean = {"complete": True, "state": "idle", "errors": 0, "receive_only_changed": 0,
+             "global_bytes": 100, "local_bytes": 100, "completion": 100.0}
+    dirty = {"complete": True, "state": "idle", "errors": 0, "receive_only_changed": 0,
+             "global_bytes": 200, "local_bytes": 100, "completion": 100.0}  # local!=global
+    # clean confirmed holder wins
+    assert _choose_source([1, 2], {1, 2}, {1: dirty, 2: clean}) == 2
+    # a clean copy beats a stale GPUStack holder that isn't clean
+    assert _choose_source([1, 2], {1}, {1: dirty, 2: clean}) == 2
+    # no clean copy -> fall back to confirmed holder (lowest)
+    assert _choose_source([1, 2], {2}, {1: dirty, 2: dirty}) == 2
+    # nobody has data -> None
+    assert _choose_source([1, 2], set(), {1: None, 2: None}) is None
