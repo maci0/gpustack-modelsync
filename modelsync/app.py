@@ -222,12 +222,20 @@ async def _reconcile_core(plan: dict[str, set[int]], workers=None, folders=None)
         else:
             log.info("resolving stuck %s from clean copy %s", stuck.path, by_id[auth].name)
             try:
+                # override: the clean copy's version becomes the cluster truth.
                 await client_for(by_id[auth]).override(fid)
             except httpx.HTTPError:
                 pass
+            # revert each stuck replica so it drops its divergent/poisoned local
+            # and takes the clean version (pulls what's missing, deletes extras).
+            # Safe: source is integrity-verified. Self-limiting: a reverted folder
+            # goes to syncing, so it isn't re-detected as stuck (no reset loop).
             for r in rows:
                 if r.path == stuck.path and r.worker_id != auth and not r.complete and r.worker_id in by_id:
-                    await _heavy_reset(client_for(by_id[r.worker_id]), fid)
+                    try:
+                        await client_for(by_id[r.worker_id]).revert(fid)
+                    except httpx.HTTPError:
+                        pass
 
     registered, deregistered = [], []
     if settings.register_in_gpustack:
@@ -482,11 +490,9 @@ async def reset(body: ResetIn) -> dict:
         # override forces the source's content cluster-wide, bypassing the revert
         # guards — only do it when the source is actually complete, else it could
         # propagate an empty/stale source and wipe good replicas.
-        override_ok = False
         if src_compl >= 100.0:
             try:
                 await client_for(by_id[src]).override(fid)
-                override_ok = True
                 actions.append(f"{by_id[src].name}: override (source)")
             except httpx.HTTPError:
                 actions.append(f"{by_id[src].name}: override failed")
@@ -497,12 +503,12 @@ async def reset(body: ResetIn) -> dict:
             c = client_for(by_id[wid])
             try:
                 st = await c.folder_status(fid)
-                if st["errors"] > 0 or st["state"] == "error":
+                # /reset is a deliberate operator recovery: heavy-reset ANY
+                # incomplete replica (drop its index db and rescan clean from the
+                # overridden source), which fixes deep index poison that a plain
+                # revert can't. A complete replica is left alone.
+                if not st["complete"]:
                     actions.append(f"{by_id[wid].name}: {await _heavy_reset(c, fid)}")
-                elif (override_ok and st["global_bytes"] > 0 and not st["complete"]
-                      and st["receive_only_changed"] > 0 and st["completion"] < src_compl):
-                    await c.revert(fid)  # safe: known, incomplete, strictly worse than source
-                    actions.append(f"{by_id[wid].name}: revert (replica)")
                 else:
                     actions.append(f"{by_id[wid].name}: ok ({st['state']})")
             except httpx.HTTPError:
