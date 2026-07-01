@@ -67,7 +67,7 @@ PAGE = """<!doctype html>
 </body></html>"""
 
 SCRIPT = """
-let nodes=[],models=[],dirty=false,statusMap={};
+let nodes=[],models=[],dirty=false,statusMap={},polling=false;
 const $=id=>document.getElementById(id);
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const cluster=()=>$('cluster').value;
@@ -139,9 +139,13 @@ async function reset(path){
   poll();
 }
 async function poll(){
-  const st=await jget('/status'); statusMap={};
-  st.forEach(s=>statusMap[s.path+'@'+s.worker_id]=s);
-  paint();
+  if(polling)return;               // no pile-up if /status is slow
+  polling=true;
+  try{
+    const st=await jget('/status'); statusMap={};
+    st.forEach(s=>statusMap[s.path+'@'+s.worker_id]=s);
+    paint();
+  }catch(e){}finally{ polling=false; }
 }
 function updateStats(){
   const ns=vNodes(), ready=ns.filter(n=>n.state==='ready').length;
@@ -247,7 +251,7 @@ const msg=mk('div',null,'');msg.id='msmsg';
 const body=mk('div');body.id='msbody';
 panel.appendChild(hd);panel.appendChild(msg);panel.appendChild(body);document.body.appendChild(panel);
 
-let nodes=[],models=[],dirty=false,stat={},timer=null;
+let nodes=[],models=[],dirty=false,stat={},timer=null,polling=false;
 const vn=()=>nodes.filter(n=>String(n.cluster_id)===cl.value);
 function setMsg(t){msg.textContent=t;}
 
@@ -295,7 +299,7 @@ function paint(){
     u.innerHTML=have?'<span class="bdg k-gh">present</span>':'';
   });
 }
-async function poll(){try{const st=await gm('GET','/status');stat={};st.forEach(s=>stat[s.path+'@'+s.worker_id]=s);paint();}catch(e){}}
+async function poll(){if(polling)return;polling=true;try{const st=await gm('GET','/status');stat={};st.forEach(s=>stat[s.path+'@'+s.worker_id]=s);paint();}catch(e){}finally{polling=false;}}
 async function doApply(){
   const plan={};body.querySelectorAll('input:checked').forEach(c=>{(plan[c.dataset.m]=plan[c.dataset.m]||[]).push(+c.dataset.n);});
   setMsg('applying…');
