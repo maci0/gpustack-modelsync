@@ -54,8 +54,18 @@ def _load_json(path: Path, default):
         return default
 
 
+def _int_ids(v) -> set[int]:
+    """Coerce a JSON value to a set of ints, dropping anything else. Guards the
+    state-file trust boundary: a hand-edited/corrupt file must not crash startup
+    (e.g. set(5) TypeError) or inject str ids that silently never match."""
+    return {x for x in v if isinstance(x, int) and not isinstance(x, bool)} if isinstance(v, list) else set()
+
+
 def load_plan() -> dict[str, set[int]]:
-    return {k: set(v) for k, v in _load_json(PLAN_FILE, {}).items()}
+    raw = _load_json(PLAN_FILE, {})
+    if not isinstance(raw, dict):
+        return {}
+    return {k: ids for k, v in raw.items() if isinstance(k, str) and (ids := _int_ids(v))}
 
 
 def save_plan(plan: dict[str, set[int]]) -> None:
@@ -64,10 +74,12 @@ def save_plan(plan: dict[str, set[int]]) -> None:
 
 def load_registry() -> dict[str, int]:
     raw = _load_json(REGISTRY_FILE, {})
+    if not isinstance(raw, dict):
+        return {}
     out = {}
     for k, v in raw.items():
-        wid_s = k.split("@", 1)[0]
-        if wid_s.lstrip("-").isdigit() and isinstance(v, int):
+        wid_s = k.split("@", 1)[0] if isinstance(k, str) else ""
+        if wid_s.lstrip("-").isdigit() and isinstance(v, int) and not isinstance(v, bool):
             out[k] = v  # drop malformed keys instead of crashing later on int()
         else:
             log.warning("dropping malformed registry key %r", k)
@@ -79,7 +91,7 @@ def save_registry(reg: dict[str, int]) -> None:
 
 
 def load_members() -> set[int]:
-    return set(_load_json(MEMBERS_FILE, []))
+    return _int_ids(_load_json(MEMBERS_FILE, []))
 
 
 def save_members(m: set[int]) -> None:

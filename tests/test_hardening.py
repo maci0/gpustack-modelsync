@@ -80,6 +80,26 @@ def test_load_registry_drops_malformed(tmp_path, monkeypatch):
     assert A.load_registry() == {"7@/p": 44}  # non-int value + non-digit wid dropped
 
 
+def test_state_loaders_robust_to_corruption(tmp_path, monkeypatch):
+    # plan.json with a non-list value used to crash startup (set(5) -> TypeError)
+    pf = tmp_path / "plan.json"
+    pf.write_text(json.dumps({"/a": [1, 2], "/b": 5, "/c": ["x"], "/d": [3, True, "y"]}))
+    monkeypatch.setattr(A, "PLAN_FILE", pf)
+    assert A.load_plan() == {"/a": {1, 2}, "/d": {3}}  # non-list, no-int, bool/str dropped
+
+    mf = tmp_path / "m.json"
+    monkeypatch.setattr(A, "MEMBERS_FILE", mf)
+    mf.write_text(json.dumps({"not": "a list"}))        # non-list JSON
+    assert A.load_members() == set()
+    mf.write_text(json.dumps([1, 2, "x", True]))
+    assert A.load_members() == {1, 2}                   # str + bool dropped
+
+    rf = tmp_path / "r.json"
+    monkeypatch.setattr(A, "REGISTRY_FILE", rf)
+    rf.write_text(json.dumps([1, 2, 3]))                # non-dict JSON
+    assert A.load_registry() == {}
+
+
 def test_prune_plan_and_false_empty_safety():
     from modelsync.app import _prune_plan
     assert _prune_plan({"/a": {1}, "/b": {2}}, {"/a"}) == {"/a": {1}}   # /b deleted -> dropped
