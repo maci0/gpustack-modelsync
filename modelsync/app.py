@@ -433,7 +433,8 @@ def _eligible(requested, workers, folders) -> tuple[dict[str, set[int]], list[st
         keep: set[int] = set()
         for wid in targets:
             w = by_id.get(wid)
-            if w is None:
+            if w is None:  # selected a node that no longer exists — never silent
+                warn.append(f"node {wid}: unknown or removed, skipped {path}")
                 continue
             if wid in have.get(path, set()):
                 keep.add(wid)
@@ -475,8 +476,8 @@ async def set_plan(body: PlanIn) -> dict:
 
         state.plan = plan
         save_plan(plan)
-        state.members |= {wid for t in plan.values() for wid in t}
-        save_members(state.members)
+        # members are recomputed authoritatively inside _reconcile_core (from
+        # plan | registry), so no need to pre-add here.
         result = await _reconcile_core(plan, workers, folders)
 
     warnings += result["warnings"]

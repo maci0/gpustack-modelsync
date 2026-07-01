@@ -199,6 +199,21 @@ async def test_24_model_folders_bad_size():
     assert len(r) == 1 and r[0].size == 0
 
 
+# 25. _eligible: holder kept; maintenance / capacity / stale-id / unknown-path all warned
+def test_25_eligible_branches():
+    from modelsync.app import _eligible
+    from modelsync.gpustack import ModelFolder
+    workers = [W(1), Worker(id=2, name="n2", ip="10.0.0.2", state="ready", maintenance=True),
+               W(3, free=10)]
+    folders = [ModelFolder(path="/m", label="m", size=100, current_nodes=[1], spec={})]
+    out, warn = _eligible({"/m": {1, 2, 3, 99}, "/unknown": {1}}, workers, folders)
+    assert out == {"/m": {1}}                                  # only the holder survives
+    assert any("unknown or removed" in w for w in warn)        # 99 stale
+    assert any("maintenance" in w for w in warn)               # 2 in maintenance
+    assert any("free" in w for w in warn)                      # 3 too small
+    assert any("unknown model path" in w for w in warn)        # /unknown
+
+
 class _FakeSt:
     async def folder_status(self, fid):
         return st(need_bytes=0)
