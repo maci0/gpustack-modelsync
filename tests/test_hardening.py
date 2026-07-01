@@ -80,6 +80,24 @@ def test_load_registry_drops_malformed(tmp_path, monkeypatch):
     assert A.load_registry() == {"7@/p": 44}  # non-int value + non-digit wid dropped
 
 
+def test_syncstatus_clean():
+    from modelsync.reconcile import SyncStatus
+
+    def s(**kw):
+        d = dict(path="/p", worker_id=1, worker_name="n", completion=100.0,
+                 complete=True, state="idle", need_bytes=0, local_bytes=100,
+                 global_bytes=100, receive_only_changed=0, errors=0)
+        d.update(kw)
+        return SyncStatus(**d)
+
+    assert s().clean                                   # complete, idle, local==global
+    assert not s(local_bytes=200).clean                # doubled/poisoned index
+    assert not s(errors=1).clean                       # errors
+    assert not s(receive_only_changed=50).clean        # local divergence
+    assert not s(complete=False).clean                 # not complete
+    assert not s(state="scanning").clean               # not settled
+
+
 def test_instance_dir():
     assert _instance_dir({"resolved_path": "/m/A/model.safetensors"}) == "/m/A"
     assert _instance_dir({"resolved_path": "/m/A"}) == "/m/A"  # already a dir

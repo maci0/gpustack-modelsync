@@ -50,7 +50,7 @@ class FakeSync:
         g = 1 if self.compl > 0 else 0
         return {"completion": self.compl, "complete": self.compl >= 100 and self.need == 0,
                 "state": "idle", "need_bytes": self.need, "global_bytes": g,
-                "errors": 0, "receive_only_changed": self.diverged}
+                "local_bytes": g, "errors": 0, "receive_only_changed": self.diverged}
 
     async def revert(self, fid):
         self.reverted.append(fid)
@@ -84,14 +84,26 @@ async def test_meshes_source_sendonly_replica_receiveonly_and_gc():
 
 
 async def test_diverged_source_overrides_to_converge():
-    # source (confirmed holder) idle but needing bytes = a replica diverges from
-    # it; override makes the source authoritative so it can reach complete.
+    # only holder is a confirmed source that is idle but needing bytes (a replica
+    # diverges from it); with no clean alternative, override it to converge.
     path = "/c/m"
     workers = [W(1), W(2)]
-    fakes = {1: FakeSync("DEV1", compl=100, need=2087), 2: FakeSync("DEV2", compl=100)}
+    fakes = {1: FakeSync("DEV1", compl=100, need=2087), 2: FakeSync("DEV2", compl=0)}
     await reconcile({path: {1, 2}}, workers, make(fakes), have={path: {1}})
     assert fakes[1].overridden == [folder_id(path)]  # source overrode
-    assert fakes[2].overridden == []                  # replica did not
+    assert fakes[2].overridden == []
+
+
+async def test_clean_node_preferred_as_source_over_stale_holder():
+    # GPUStack says node 1 holds it, but node 1's copy is empty/dirty while node 2
+    # has a clean verified copy -> node 2 becomes source (integrity over stale have).
+    path = "/c/m"
+    workers = [W(1), W(2)]
+    fakes = {1: FakeSync("DEV1", compl=0), 2: FakeSync("DEV2", compl=100)}  # 1 empty, 2 clean
+    await reconcile({path: {1, 2}}, workers, make(fakes), have={path: {1}})
+    fid = folder_id(path)
+    assert fakes[2].types[fid] == "sendonly"    # clean node 2 is the source
+    assert fakes[1].types[fid] == "receiveonly"
 
 
 async def test_no_source_skips_path():

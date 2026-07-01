@@ -161,7 +161,18 @@ class SyncthingClient:
             "state": state,
             "need_bytes": need,
             "global_bytes": g,
+            # bytes actually present locally on disk (for integrity vs GPUStack's
+            # expected model size — a poisoned global can't fake this).
+            "local_bytes": int(d.get("localBytes") or 0),
             "errors": int(d.get("errors") or 0) + int(d.get("pullErrors") or 0),
             # receive-only divergence: local files not matching the source.
             "receive_only_changed": int(d.get("receiveOnlyChangedBytes") or 0),
         }
+
+    async def file_info(self, folder_id: str, file: str) -> dict:
+        """Per-file record incl. block hashes + version (deeper integrity check).
+        `global`/`local` each carry the file's size, modified time, and blocks."""
+        r = await self._req(
+            "GET", "/rest/db/file", params={"folder": folder_id, "file": file}
+        )
+        return r.json()

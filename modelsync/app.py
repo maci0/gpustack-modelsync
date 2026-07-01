@@ -191,6 +191,44 @@ async def _reconcile_core(plan: dict[str, set[int]], workers=None, folders=None)
     rows = await collect_status(plan, workers, client_for)
     done = {(r.path, r.worker_id) for r in rows if r.complete}  # both APIs agree
 
+    # Resolve at most ONE stuck path per pass. A folder settled (idle/error) yet
+    # still "needing" bytes is stuck (poisoned index after remove -> re-add), not
+    # mid-sync (need>0 also skips a fresh, not-yet-connected folder). Resolve it
+    # from the AUTHORITATIVE copy: the node whose folder is complete (full, clean,
+    # and GPUStack-known). Override that copy so its version wins cluster-wide,
+    # then drop the poisoned index on the stuck node(s) so they re-pull it clean.
+    # Deterministic and convergent: once fixed the node is complete, not stuck, so
+    # it won't re-trigger (no loop). No complete copy anywhere -> surface, no act.
+    by_id = {w.id: w for w in workers}
+    working = ("scanning", "syncing", "sync-preparing", "cleaning")
+    stuck = next(
+        (r for r in rows
+         if not r.complete and r.need_bytes > 0
+         and r.state not in working and r.worker_id in by_id),
+        None,
+    )
+    if stuck:
+        fid = folder_id(stuck.path)
+        # Authoritative = a Syncthing-CLEAN copy (self-consistent, hash-verified,
+        # not a doubled/poisoned index), preferring a GPUStack-confirmed holder,
+        # and among those the smallest global (the un-poisoned true size). This
+        # doesn't trust GPUStack's weights-only size, nor a poisoned "complete".
+        cands = [r for r in rows if r.path == stuck.path and r.clean and r.worker_id in by_id]
+        holders = [r for r in cands if r.worker_id in have.get(stuck.path, set())]
+        pool = holders or cands
+        auth = min(pool, key=lambda r: r.global_bytes).worker_id if pool else None
+        if auth is None:
+            log.warning("stuck %s: no clean verified copy to resolve from; manual check", stuck.path)
+        else:
+            log.info("resolving stuck %s from clean copy %s", stuck.path, by_id[auth].name)
+            try:
+                await client_for(by_id[auth]).override(fid)
+            except httpx.HTTPError:
+                pass
+            for r in rows:
+                if r.path == stuck.path and r.worker_id != auth and not r.complete and r.worker_id in by_id:
+                    await _heavy_reset(client_for(by_id[r.worker_id]), fid)
+
     registered, deregistered = [], []
     if settings.register_in_gpustack:
         for path, targets in plan.items():
@@ -254,7 +292,19 @@ async def _reconcile_core(plan: dict[str, set[int]], workers=None, folders=None)
 
 async def reconcile_all(plan: dict[str, set[int]] | None = None) -> dict:
     async with state.lock:
-        return await _reconcile_core(state.plan if plan is None else plan)
+        if plan is not None:
+            return await _reconcile_core(plan)
+        # background path: prune plan entries whose model no longer exists in
+        # GPUStack (deleted there) so its sync stops within one interval. Errors
+        # propagate (loop retries), so a transient API blip never prunes.
+        folders = await state.gpustack.model_folders()
+        known = {f.path for f in folders}
+        kept = {p: t for p, t in state.plan.items() if p in known}
+        if kept != state.plan:
+            log.info("pruning %d plan entries deleted from GPUStack", len(state.plan) - len(kept))
+            state.plan = kept
+            save_plan(state.plan)
+        return await _reconcile_core(state.plan, folders=folders)
 
 
 async def _background_loop() -> None:
@@ -499,8 +549,12 @@ async def _heavy_reset(c: SyncthingClient, fid: str) -> str:
 @app.get("/status", dependencies=[Depends(require_auth)])
 async def status() -> list[dict]:
     workers = await state.gpustack.workers()
+    folders = await state.gpustack.model_folders()
+    exp = {f.path: f.size for f in folders}
     rows = await collect_status(state.plan, workers, client_for)
-    return [r.__dict__ for r in rows]
+    # clean = Syncthing-verified self-consistent copy; expected_bytes = GPUStack's
+    # weights-only size (shown for reference, not used to judge integrity).
+    return [{**r.__dict__, "expected_bytes": exp.get(r.path, 0), "clean": r.clean} for r in rows]
 
 
 @app.get("/suggest", dependencies=[Depends(require_auth)])

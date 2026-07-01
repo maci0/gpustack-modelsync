@@ -42,7 +42,25 @@ class SyncStatus:
     complete: bool = False  # both: globalBytes>0 and needBytes==0
     state: str = "unknown"
     need_bytes: int = 0
+    local_bytes: int = 0  # bytes actually on disk (Syncthing-hashed)
+    global_bytes: int = 0
+    receive_only_changed: int = 0
     errors: int = 0
+
+    @property
+    def clean(self) -> bool:
+        """Syncthing verified a self-consistent full copy: complete + idle, no
+        errors, no receive-only divergence, and local matches global (not a
+        doubled/poisoned index). This is the reliable integrity signal — GPUStack's
+        ModelFile.size counts only weights, so it can't be used as the reference."""
+        return (
+            self.complete
+            and self.state == "idle"
+            and self.errors == 0
+            and self.receive_only_changed == 0
+            and self.global_bytes > 0
+            and self.local_bytes == self.global_bytes
+        )
 
 
 def _addr(w: Worker, port: int) -> str:
@@ -151,12 +169,34 @@ async def reconcile(
     return sorted(unreachable), warnings
 
 
+def _is_clean(st: dict | None) -> bool:
+    """A Syncthing-verified, self-consistent full copy (hash-checked, not a
+    doubled/poisoned index). The reliable integrity signal."""
+    return bool(
+        st
+        and st.get("complete")
+        and st.get("state") == "idle"
+        and not st.get("errors")
+        and not st.get("receive_only_changed")
+        and st.get("global_bytes", 0) > 0
+        and st.get("local_bytes") == st.get("global_bytes")
+    )
+
+
 def _choose_source(
     targets: list[int], have: set[int], status: dict[int, dict | None]
 ) -> int | None:
-    """Authoritative node for a model: a GPUStack-confirmed holder (stable, lowest
-    id), else the most-complete node by Syncthing if any has data, else None."""
+    """Authoritative node, integrity-first: a confirmed holder with a clean
+    verified copy; else ANY node with a clean copy (a clean copy is trusted over
+    GPUStack's possibly-stale `have`, e.g. a holder whose files were deleted);
+    else a confirmed holder; else the most-complete node with data; else None."""
     confirmed = sorted(t for t in targets if t in have)
+    clean_confirmed = [t for t in confirmed if _is_clean(status.get(t))]
+    if clean_confirmed:
+        return clean_confirmed[0]
+    clean_any = sorted(t for t in targets if _is_clean(status.get(t)))
+    if clean_any:
+        return clean_any[0]
     if confirmed:
         return confirmed[0]
     best, best_c = None, 0.0
@@ -185,7 +225,8 @@ async def collect_status(
                 out.append(
                     SyncStatus(
                         path, wid, w.name, s["completion"], s["complete"],
-                        s["state"], s["need_bytes"], s["errors"],
+                        s["state"], s["need_bytes"], s["local_bytes"],
+                        s["global_bytes"], s["receive_only_changed"], s["errors"],
                     )
                 )
             except _NET_ERRORS:
