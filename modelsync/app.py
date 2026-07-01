@@ -104,6 +104,7 @@ class State:
     plan: dict[str, set[int]]
     registry: dict[str, int]
     members: set[int]
+    resetting: set[str]  # paths under an in-flight /reset; background loop skips them
     lock: asyncio.Lock
     loop_task: asyncio.Task
 
@@ -165,6 +166,7 @@ async def lifespan(app: FastAPI):
     state.plan = load_plan()
     state.registry = load_registry()
     state.members = load_members()
+    state.resetting = set()
     state.lock = asyncio.Lock()
     if not settings.auth_token:
         log.warning("MODELSYNC_AUTH_TOKEN unset — orchestrator API is UNAUTHENTICATED")
@@ -216,7 +218,8 @@ async def _reconcile_core(plan: dict[str, set[int]], workers=None, folders=None)
     stuck = next(
         (r for r in rows
          if not r.complete and r.need_bytes > 0
-         and r.state not in working and r.worker_id in by_id),
+         and r.state not in working and r.worker_id in by_id
+         and r.path not in state.resetting),  # don't fight an in-flight /reset
         None,
     )
     if stuck:
@@ -486,8 +489,10 @@ class ResetIn(BaseModel):
 
 @app.post("/reset", dependencies=[Depends(require_auth)])
 async def reset(body: ResetIn) -> dict:
-    """Operator recovery for a stuck/conflicted folder. Held under the lock so it
-    can't interleave with the background reconcile on the same folder."""
+    """Operator recovery for a stuck/conflicted folder. Setup runs under the lock;
+    the slow recovery (pause/reset can take many seconds) runs OUTSIDE it, with a
+    per-path guard so the background loop won't touch the same folder meanwhile —
+    avoids both a race and freezing all orchestration behind one reset."""
     path = body.path
     async with state.lock:
         await _reconcile_core(state.plan)  # ensure folders wired
@@ -508,14 +513,14 @@ async def reset(body: ResetIn) -> dict:
         src = _choose_source(targets, have.get(path, set()), status)
         if src is None:
             return {"ok": False, "error": "no reachable source node holds this model"}
-        replicas = [t for t in targets if t != src]
-        actions: list[str] = []
+        state.resetting.add(path)  # background loop skips this folder while set
 
-        # Source completion gates override (reuse the status already fetched).
+    replicas = [t for t in targets if t != src]
+    actions: list[str] = []
+    try:
+        # Source completion gates override; only override a complete source, else
+        # it could propagate an empty/stale copy and wipe good replicas.
         src_compl = (status[src] or {}).get("completion", 0.0)
-        # override forces the source's content cluster-wide, bypassing the revert
-        # guards — only do it when the source is actually complete, else it could
-        # propagate an empty/stale source and wipe good replicas.
         if src_compl >= 100.0:
             try:
                 await client_for(by_id[src]).override(fid)
@@ -529,16 +534,17 @@ async def reset(body: ResetIn) -> dict:
             c = client_for(by_id[wid])
             try:
                 st = await c.folder_status(fid)
-                # /reset is a deliberate operator recovery: heavy-reset ANY
-                # incomplete replica (drop its index db and rescan clean from the
-                # overridden source), which fixes deep index poison that a plain
-                # revert can't. A complete replica is left alone.
+                # deliberate recovery: heavy-reset ANY incomplete replica (drop its
+                # index db, rescan clean from the overridden source) — fixes deep
+                # poison a revert can't. A complete replica is left alone.
                 if not st["complete"]:
                     actions.append(f"{by_id[wid].name}: {await _heavy_reset(c, fid)}")
                 else:
                     actions.append(f"{by_id[wid].name}: ok ({st['state']})")
             except httpx.HTTPError:
                 actions.append(f"{by_id[wid].name}: unreachable")
+    finally:
+        state.resetting.discard(path)
     return {"ok": True, "source": src, "actions": actions}
 
 
