@@ -566,9 +566,7 @@ async def _heavy_reset(c: SyncthingClient, fid: str) -> str:
     try:
         for _ in range(15):
             try:
-                # runtime state (db/status), not the config flag we just set —
-                # the runner stops asynchronously after the PATCH.
-                if (await c.folder_status(fid))["state"] == "paused":
+                if await c.is_paused(fid):  # config flag; runtime state never says "paused"
                     paused = True
                     break
             except httpx.HTTPError:

@@ -106,6 +106,13 @@ class SyncthingClient:
             "PATCH", f"/rest/config/folders/{folder_id}", json={"paused": paused}
         )
 
+    async def is_paused(self, folder_id: str) -> bool:
+        """Config `paused` flag. This (not the db/status runtime state, which does
+        NOT report a literal 'paused') is the check that reliably confirms a
+        folder is paused before a reset."""
+        r = await self._req("GET", f"/rest/config/folders/{folder_id}")
+        return bool(r.json().get("paused"))
+
     async def reset_folder_db(self, folder_id: str) -> None:
         """Drop the folder's local index database (folder MUST be paused first),
         forcing a fresh rescan + index from peers. Clears a corrupted index that
