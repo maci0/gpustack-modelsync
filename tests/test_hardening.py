@@ -1,13 +1,30 @@
 """Tests for the round-3 hardening: path-root guard, auth, heavy-reset
 always-unpause, pagination stop conditions, unknown-path rejection."""
 
+import json
+
 import fastapi
 import httpx
 import pytest
 
-from modelsync.app import _check_token, _eligible, _heavy_reset
+import modelsync.app as A
+from modelsync.app import (
+    _atomic_write,
+    _check_token,
+    _eligible,
+    _heavy_reset,
+    _load_json,
+    require_auth,
+    require_auth_query,
+)
 from modelsync.config import settings
-from modelsync.gpustack import GPUStackClient, ModelFolder, Worker, _under_roots
+from modelsync.gpustack import (
+    GPUStackClient,
+    ModelFolder,
+    Worker,
+    _instance_dir,
+    _under_roots,
+)
 
 ROOTS = ["/var/lib/gpustack"]
 
@@ -29,6 +46,45 @@ def test_check_token(monkeypatch):
         _check_token("wrong")
     with pytest.raises(fastapi.HTTPException):
         _check_token("café")  # non-ascii must 401, not TypeError/500
+
+
+async def test_require_auth_header_vs_query(monkeypatch):
+    monkeypatch.setattr(settings, "auth_token", "tok")
+    await require_auth(authorization="Bearer tok", x_auth_token=None)   # bearer
+    await require_auth(authorization=None, x_auth_token="tok")          # header
+    with pytest.raises(fastapi.HTTPException):
+        await require_auth(authorization="Bearer bad", x_auth_token=None)
+    # query token: accepted ONLY by the /events dependency, never by require_auth
+    await require_auth_query(authorization=None, x_auth_token=None, token="tok")
+    with pytest.raises(fastapi.HTTPException):
+        await require_auth_query(authorization=None, x_auth_token=None, token="bad")
+
+
+def test_load_json_corrupt_backs_up_and_defaults(tmp_path):
+    p = tmp_path / "x.json"
+    p.write_text("{ this is not json")
+    assert _load_json(p, {"d": 1}) == {"d": 1}
+    assert (tmp_path / "x.json.corrupt").exists()  # bad file preserved for inspection
+
+
+def test_atomic_write_roundtrip(tmp_path):
+    p = tmp_path / "a.json"
+    _atomic_write(p, "hello")
+    assert p.read_text() == "hello" and not (tmp_path / "a.json.tmp").exists()
+
+
+def test_load_registry_drops_malformed(tmp_path, monkeypatch):
+    f = tmp_path / "r.json"
+    f.write_text(json.dumps({"7@/p": 44, "bad@/p": "notint", "x@/p": 5}))
+    monkeypatch.setattr(A, "REGISTRY_FILE", f)
+    assert A.load_registry() == {"7@/p": 44}  # non-int value + non-digit wid dropped
+
+
+def test_instance_dir():
+    assert _instance_dir({"resolved_path": "/m/A/model.safetensors"}) == "/m/A"
+    assert _instance_dir({"resolved_path": "/m/A"}) == "/m/A"  # already a dir
+    assert _instance_dir({"local_path": "/m/B"}) == "/m/B"
+    assert _instance_dir({}) is None
 
 
 class FakeReset:
