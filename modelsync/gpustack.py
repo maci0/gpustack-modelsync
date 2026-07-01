@@ -197,8 +197,17 @@ class GPUStackClient:
         ]
 
     async def model_instances(self) -> list[ModelInstance]:
+        # Best-effort: instances only drive the decorative "serving" badge and
+        # /suggest, never a destructive action, so a transient error just yields
+        # empty rather than 500-ing /models and /status. (model_folders, which
+        # DOES drive reconcile/GC, stays strict and propagates errors.)
+        try:
+            items = await self._list(f"{self._v}/model-instances")
+        except httpx.HTTPError:
+            log.warning("model-instances fetch failed; serving info omitted")
+            return []
         out = []
-        for mi in await self._list(f"{self._v}/model-instances"):
+        for mi in items:
             out.append(
                 ModelInstance(
                     model_id=mi.get("model_id"),

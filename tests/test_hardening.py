@@ -80,6 +80,14 @@ def test_load_registry_drops_malformed(tmp_path, monkeypatch):
     assert A.load_registry() == {"7@/p": 44}  # non-int value + non-digit wid dropped
 
 
+def test_prune_plan_and_false_empty_safety():
+    from modelsync.app import _prune_plan
+    assert _prune_plan({"/a": {1}, "/b": {2}}, {"/a"}) == {"/a": {1}}   # /b deleted -> dropped
+    assert _prune_plan({"/a": {1}}, {"/a", "/b"}) == {"/a": {1}}        # extra known ignored
+    assert _prune_plan({"/a": {1}}, set()) == {"/a": {1}}              # empty models + plan -> KEEP (safety)
+    assert _prune_plan({}, set()) == {}                                # empty plan stays empty
+
+
 def test_syncstatus_clean():
     from modelsync.reconcile import SyncStatus
 

@@ -168,11 +168,3 @@ class SyncthingClient:
             # receive-only divergence: local files not matching the source.
             "receive_only_changed": int(d.get("receiveOnlyChangedBytes") or 0),
         }
-
-    async def file_info(self, folder_id: str, file: str) -> dict:
-        """Per-file record incl. block hashes + version (deeper integrity check).
-        `global`/`local` each carry the file's size, modified time, and blocks."""
-        r = await self._req(
-            "GET", "/rest/db/file", params={"folder": folder_id, "file": file}
-        )
-        return r.json()

@@ -306,13 +306,22 @@ async def reconcile_all(plan: dict[str, set[int]] | None = None) -> dict:
         # GPUStack (deleted there) so its sync stops within one interval. Errors
         # propagate (loop retries), so a transient API blip never prunes.
         folders = await state.gpustack.model_folders()
-        known = {f.path for f in folders}
-        kept = {p: t for p, t in state.plan.items() if p in known}
+        kept = _prune_plan(state.plan, {f.path for f in folders})
         if kept != state.plan:
             log.info("pruning %d plan entries deleted from GPUStack", len(state.plan) - len(kept))
             state.plan = kept
             save_plan(state.plan)
         return await _reconcile_core(state.plan, folders=folders)
+
+
+def _prune_plan(plan: dict[str, set[int]], known_paths: set[str]) -> dict[str, set[int]]:
+    """Drop plan entries for models GPUStack no longer reports. Safety: an EMPTY
+    model list against a non-empty plan is treated as a suspicious false-empty
+    response (auth glitch / filter bug) and left untouched — never deregister
+    everything on a bad 200. Genuine full-delete is rare; clear the plan by hand."""
+    if not known_paths and plan:
+        return plan
+    return {p: t for p, t in plan.items() if p in known_paths}
 
 
 async def _background_loop() -> None:
