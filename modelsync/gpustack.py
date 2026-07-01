@@ -99,7 +99,8 @@ class GPUStackClient:
         # PaginatedList -> {"items":[...]}. Branch on type FIRST (a bare list
         # has no .get); never call .get on a list.
         if isinstance(data, dict):
-            return data.get("items", [])
+            v = data.get("items")
+            return v if isinstance(v, list) else []  # {"items": null} -> [], not None
         return data if isinstance(data, list) else []
 
     async def _list(self, path: str, per_page: int = 100, max_pages: int = 1000) -> list:
@@ -112,15 +113,20 @@ class GPUStackClient:
             data = await self._get(path, page=page, perPage=per_page)
             items = self._items(data)
             out.extend(items)
+            # Coerce pagination metadata safely: a non-numeric field must not
+            # crash the fetch, it just falls back to the short-page heuristic.
             total_pages = None
             if isinstance(data, dict):
-                pg = data.get("pagination") or {}
-                total_pages = pg.get("totalPage") or pg.get("total_pages")
-                if total_pages is None and pg.get("total") is not None:
-                    pp = pg.get("perPage") or per_page or 1
-                    total_pages = -(-int(pg["total"]) // int(pp))  # ceil div
+                pg = data.get("pagination") if isinstance(data.get("pagination"), dict) else {}
+                tp = _int_or_none(pg.get("totalPage")) or _int_or_none(pg.get("total_pages"))
+                total = _int_or_none(pg.get("total"))
+                if tp is not None:
+                    total_pages = tp
+                elif total is not None:
+                    pp = _int_or_none(pg.get("perPage")) or per_page or 1
+                    total_pages = -(-total // pp)  # ceil div
             if total_pages is not None:
-                if page >= int(total_pages):
+                if page >= total_pages:
                     break
             elif len(items) < per_page:  # no metadata: stop on a short page
                 break
@@ -181,7 +187,7 @@ class GPUStackClient:
             wid = mf.get("worker_id")
             bucket = size_bw.setdefault(path, {})
             key = wid if wid is not None else -1
-            bucket[key] = bucket.get(key, 0) + int(mf.get("size") or 0)
+            bucket[key] = bucket.get(key, 0) + _int(mf.get("size"))  # safe: malformed size -> 0
             spec.setdefault(path, {k: mf[k] for k in _SPEC_KEYS if mf.get(k)})
             if wid is not None:
                 nodes[path].add(wid)

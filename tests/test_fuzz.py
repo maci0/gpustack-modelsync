@@ -78,6 +78,13 @@ def test_maintenance_on_never_crashes(v):
 
 
 @settings(max_examples=300)
+@given(json_val)
+def test_items_always_list(v):
+    from modelsync.gpustack import GPUStackClient
+    assert isinstance(GPUStackClient._items(v), list)
+
+
+@settings(max_examples=300)
 @given(st.text())
 def test_folder_id_always_valid(s):
     fid = folder_id(s)

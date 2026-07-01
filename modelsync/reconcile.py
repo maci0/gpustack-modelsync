@@ -64,7 +64,10 @@ class SyncStatus:
 
 
 def _addr(w: Worker, port: int) -> str:
-    return f"tcp://{w.ip}:{port}"
+    # IPv6 literals must be bracketed in a host:port URL, else the port is
+    # ambiguous ("fd00::1:22000") and Syncthing can't dial the peer.
+    host = f"[{w.ip}]" if ":" in w.ip else w.ip
+    return f"tcp://{host}:{port}"
 
 
 async def reconcile(

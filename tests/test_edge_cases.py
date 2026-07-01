@@ -161,6 +161,44 @@ def test_20_completion_never_negative():
     assert s.completion >= 0.0 and not s.clean   # poisoned -> not clean
 
 
+# 21. _addr brackets IPv6, leaves IPv4 bare
+def test_21_addr_ipv6_brackets():
+    from modelsync.reconcile import _addr
+    assert _addr(W(1), 22000) == "tcp://10.0.0.1:22000"
+    assert _addr(Worker(id=2, name="n", ip="fd00::1", state="ready"), 22000) == "tcp://[fd00::1]:22000"
+
+
+# 22. _list survives malformed pagination metadata (non-numeric total/perPage)
+async def test_22_list_malformed_pagination():
+    gp = GPUStackClient("http://x", "t", None)
+
+    async def fake_get(path, **k):
+        return {"items": [{"id": 1}], "pagination": {"total": "abc", "perPage": "xyz"}}
+
+    gp._get = fake_get
+    assert await gp._list("/w") == [{"id": 1}]   # no crash; short-page stop
+
+
+# 23. _items coerces null/non-list items to []
+def test_23_items_null_or_nonlist():
+    assert GPUStackClient._items({"items": None}) == []
+    assert GPUStackClient._items({"items": {"a": 1}}) == []
+    assert GPUStackClient._items([1, 2]) == [1, 2]
+    assert GPUStackClient._items("junk") == []
+
+
+# 24. model_folders tolerates a malformed size field
+async def test_24_model_folders_bad_size():
+    gp = GPUStackClient("http://x", "t", None)
+
+    async def fl(p, **k):
+        return [{"worker_id": 1, "local_dir": "/var/lib/gpustack/m", "size": "abc"}]
+
+    gp._list = fl
+    r = await gp.model_folders()
+    assert len(r) == 1 and r[0].size == 0
+
+
 class _FakeSt:
     async def folder_status(self, fid):
         return st(need_bytes=0)
