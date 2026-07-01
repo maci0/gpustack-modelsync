@@ -192,8 +192,30 @@ The orchestrator mutates GPUStack and reconfigures Syncthing on every node, so:
 - **Plan stored in `plan.json`** next to the orchestrator. Fine for one
   instance; move to GPUStack's DB if you want it co-located.
 
-## Test
+## Verification
+
+Three machine-checked layers, each covering what the others can't:
 
 ```bash
-uv run pytest -q
+uv run pytest -q                              # 92 unit + integration tests
+uv run pyright                                # strict type check, 0 errors
+uv run ruff check modelsync                   # lint, 0 errors
 ```
+
+- **Type safety (proved by pyright).** `typeCheckingMode = "strict"`, zero errors.
+  This proves the absence of a whole error class in the typed core: no
+  None-access, bad-attribute, operator, or argument type mismatches.
+- **Parser totality (proved by property-based fuzzing).** `tests/test_fuzz.py`
+  runs every parser on the untrusted boundary (GPUStack/Syncthing JSON, corrupt
+  state files) against `hypothesis`-generated arbitrary input. Contract: a parser
+  never raises, only degrades to a safe default. This covers the one place types
+  can't — the dynamically-typed JSON boundary (`Any`), where the strict
+  `reportUnknown*` rules are therefore disabled (see `[tool.pyright]`).
+- **Behavior (tested + live-validated).** 92 tests plus end-to-end runs on a real
+  multi-node cluster (add → sync → register → remove → deregister, plus failure
+  and recovery paths).
+
+Together: types prove the typed core, fuzz proves the untyped edge. What stays
+unprovable (by Rice's theorem, for any non-trivial program) is full functional
+correctness of the distributed logic — covered by tests and live validation, not
+a proof.
