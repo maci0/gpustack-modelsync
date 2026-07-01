@@ -15,7 +15,7 @@ dependencies = [
 modelsync = "modelsync.app:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "hypothesis>=6"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "hypothesis>=6", "pyright>=1.1"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -26,3 +26,16 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["modelsync"]
+
+[tool.pyright]
+include = ["modelsync"]
+typeCheckingMode = "strict"
+# GPUStack/Syncthing JSON is dynamically typed (Any by nature). Totality over
+# arbitrary/malformed input is proven by the hypothesis fuzz suite, not the type
+# checker, so the Any-propagation rules are disabled; every other strict check
+# (optional-access, argument, operator, private-usage, ...) stays on and passes.
+reportUnknownMemberType = false
+reportUnknownVariableType = false
+reportUnknownArgumentType = false
+reportUnknownParameterType = false
+reportMissingParameterType = false

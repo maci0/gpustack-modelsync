@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 import httpx
 
@@ -104,7 +104,7 @@ async def reconcile(
         fid = folder_id(path)
 
         # current per-target folder state (None = no folder yet / unreachable)
-        status: dict[int, dict | None] = {}
+        status: dict[int, dict[str, Any] | None] = {}
         for wid in targets:
             try:
                 status[wid] = await client_for(by_id[wid]).folder_status(fid)
@@ -112,7 +112,7 @@ async def reconcile(
                 status[wid] = None
 
         confirmed = set(have.get(path, set()))
-        src = _choose_source(targets, confirmed, status)
+        src = choose_source(targets, confirmed, status)
         if src is None:
             warnings.append(f"{path}: no node holds it (no source); skipped")
             continue
@@ -172,7 +172,7 @@ async def reconcile(
     return sorted(unreachable), warnings
 
 
-def _is_clean(st: dict | None) -> bool:
+def _is_clean(st: dict[str, Any] | None) -> bool:
     """A Syncthing-verified, self-consistent full copy (hash-checked, not a
     doubled/poisoned index). The reliable integrity signal."""
     return bool(
@@ -186,8 +186,8 @@ def _is_clean(st: dict | None) -> bool:
     )
 
 
-def _choose_source(
-    targets: list[int], have: set[int], status: dict[int, dict | None]
+def choose_source(
+    targets: list[int], have: set[int], status: dict[int, dict[str, Any] | None]
 ) -> int | None:
     """Authoritative node, integrity-first: a confirmed holder with a clean
     verified copy; else ANY node with a clean copy (a clean copy is trusted over

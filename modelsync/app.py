@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Any
 import asyncio
 import json
 import logging
@@ -18,7 +19,7 @@ from pydantic import BaseModel
 
 from .config import settings
 from .gpustack import GPUStackClient, Worker, free_for_path
-from .reconcile import _choose_source, collect_status, folder_id, reconcile
+from .reconcile import choose_source, collect_status, folder_id, reconcile
 from .syncthing import SyncthingClient
 from .web import PAGE, SCRIPT, USERSCRIPT
 
@@ -106,7 +107,7 @@ class State:
     members: set[int]
     resetting: set[str]  # paths under an in-flight /reset; background loop skips them
     lock: asyncio.Lock
-    loop_task: asyncio.Task
+    loop_task: asyncio.Task[None]
 
 
 state = State()
@@ -189,7 +190,7 @@ app = FastAPI(title="gpustack-modelsync", lifespan=lifespan)
 # ---- core automation (assumes state.lock held) ----------------------------
 
 
-async def _reconcile_core(plan: dict[str, set[int]], workers=None, folders=None) -> dict:
+async def _reconcile_core(plan: dict[str, set[int]], workers=None, folders=None) -> dict[str, Any]:
     if workers is None:
         workers = await state.gpustack.workers()
     if folders is None:
@@ -316,7 +317,7 @@ async def _reconcile_core(plan: dict[str, set[int]], workers=None, folders=None)
     }
 
 
-async def reconcile_all(plan: dict[str, set[int]] | None = None) -> dict:
+async def reconcile_all(plan: dict[str, set[int]] | None = None) -> dict[str, Any]:
     async with state.lock:
         if plan is not None:
             return await _reconcile_core(plan)
@@ -397,7 +398,7 @@ async def nodes() -> list[Worker]:
 
 
 @app.get("/models", dependencies=[Depends(require_auth)])
-async def models() -> list[dict]:
+async def models() -> list[dict[str, Any]]:
     folders = await state.gpustack.model_folders()
     instances = await state.gpustack.model_instances()
     plan = dict(state.plan)  # snapshot for a consistent read vs a concurrent apply
@@ -461,7 +462,7 @@ def _eligible(requested, workers, folders) -> tuple[dict[str, set[int]], list[st
 
 
 @app.post("/plan", dependencies=[Depends(require_auth)])
-async def set_plan(body: PlanIn) -> dict:
+async def set_plan(body: PlanIn) -> dict[str, Any]:
     requested = {k: set(v) for k, v in body.plan.items() if v}
     async with state.lock:
         workers = await state.gpustack.workers()
@@ -493,7 +494,7 @@ class ResetIn(BaseModel):
 
 
 @app.post("/reset", dependencies=[Depends(require_auth)])
-async def reset(body: ResetIn) -> dict:
+async def reset(body: ResetIn) -> dict[str, Any]:
     """Operator recovery for a stuck/conflicted folder. Setup runs under the lock;
     the slow recovery (pause/reset can take many seconds) runs OUTSIDE it, with a
     per-path guard so the background loop won't touch the same folder meanwhile —
@@ -516,13 +517,13 @@ async def reset(body: ResetIn) -> dict:
             fid = folder_id(path)
             # Integrity-first source (same as reconcile): a CLEAN verified copy,
             # not just the lowest GPUStack holder — never override a poisoned node.
-            status: dict[int, dict | None] = {}
+            status: dict[int, dict[str, Any] | None] = {}
             for t in targets:
                 try:
                     status[t] = await client_for(by_id[t]).folder_status(fid)
                 except httpx.HTTPError:
                     status[t] = None
-            src = _choose_source(targets, have.get(path, set()), status)
+            src = choose_source(targets, have.get(path, set()), status)
         if src is None:
             return {"ok": False, "error": "no reachable source node holds this model"}
 
@@ -593,7 +594,7 @@ async def _heavy_reset(c: SyncthingClient, fid: str) -> str:
 
 
 @app.get("/status", dependencies=[Depends(require_auth)])
-async def status() -> list[dict]:
+async def status() -> list[dict[str, Any]]:
     workers = await state.gpustack.workers()
     folders = await state.gpustack.model_folders()
     exp = {f.path: f.size for f in folders}
@@ -604,7 +605,7 @@ async def status() -> list[dict]:
 
 
 @app.get("/suggest", dependencies=[Depends(require_auth)])
-async def suggest() -> list[dict]:
+async def suggest() -> list[dict[str, Any]]:
     instances = await state.gpustack.model_instances()
     plan = dict(state.plan)  # snapshot
     out = []

@@ -6,6 +6,7 @@ device + folder entries to both sides), so peers never need manual accept.
 
 from __future__ import annotations
 
+from typing import Any
 import httpx
 
 # Force every node LAN-only: no global discovery, no relays, no NAT traversal,
@@ -15,7 +16,7 @@ import httpx
 # operator's own folders (or Syncthing's built-in 'default').
 OWNED_LABEL = "modelsync"
 
-LOCAL_ONLY_OPTIONS: dict = {
+LOCAL_ONLY_OPTIONS: dict[str, Any] = {
     "globalAnnounceEnabled": False,
     "localAnnounceEnabled": False,
     "relaysEnabled": False,
@@ -138,7 +139,7 @@ class SyncthingClient:
         r = await self._req("GET", "/rest/config/folders")
         return owned_ids(r.json(), self._roots)
 
-    async def folder_status(self, folder_id: str) -> dict:
+    async def folder_status(self, folder_id: str) -> dict[str, Any]:
         """Rich per-folder state: completion %, sync state, bytes needed, error
         count. Surfaces problems a bare % hides (a stuck folder shows error)."""
         r = await self._req("GET", "/rest/db/status", params={"folder": folder_id})
@@ -164,14 +165,15 @@ def owned_ids(folders, roots: tuple[str, ...]) -> set[str]:
         fid = f.get("id")
         if not isinstance(fid, str) or fid == "default":
             continue
-        path = f.get("path").rstrip("/") if isinstance(f.get("path"), str) else ""
+        fpath = f.get("path")
+        path = fpath.rstrip("/") if isinstance(fpath, str) else ""
         under_root = any(path == r0 or path.startswith(r0 + "/") for r0 in roots)
         if f.get("label") == OWNED_LABEL or under_root:
             out.add(fid)
     return out
 
 
-def parse_folder_status(d) -> dict:
+def parse_folder_status(d: Any) -> dict[str, Any]:
     """Coerce raw Syncthing db/status JSON into our status dict. Pure + total:
     any malformed field degrades to a safe default rather than raising."""
     if not isinstance(d, dict):

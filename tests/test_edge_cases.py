@@ -12,7 +12,7 @@ from modelsync.gpustack import (
     _under_roots,
     free_for_path,
 )
-from modelsync.reconcile import _choose_source, _is_clean, collect_status, folder_id
+from modelsync.reconcile import choose_source, _is_clean, collect_status, folder_id
 
 
 def W(i, mounts=(), free=None):
@@ -44,18 +44,18 @@ def test_3_folder_id_all_special():
 
 
 # 4. all status unreachable but a confirmed holder -> pick it
-def test_4_choose_source_confirmed_fallback():
-    assert _choose_source([1, 2], {2}, {1: None, 2: None}) == 2
+def test_4choose_source_confirmed_fallback():
+    assert choose_source([1, 2], {2}, {1: None, 2: None}) == 2
 
 
 # 5. empty targets -> None
-def test_5_choose_source_empty():
-    assert _choose_source([], set(), {}) is None
+def test_5choose_source_empty():
+    assert choose_source([], set(), {}) is None
 
 
 # 6. two clean copies -> deterministic lowest
-def test_6_choose_source_two_clean_deterministic():
-    assert _choose_source([3, 1, 2], set(), {1: st(), 2: st(), 3: st()}) == 1
+def test_6choose_source_two_clean_deterministic():
+    assert choose_source([3, 1, 2], set(), {1: st(), 2: st(), 3: st()}) == 1
 
 
 # 7. poisoned copy (local != global) is not clean

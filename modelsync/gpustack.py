@@ -6,7 +6,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 import httpx
 from pydantic import BaseModel
@@ -23,7 +23,7 @@ class Worker(BaseModel):
     unreachable: bool = False
     maintenance: bool = False
     free_bytes: int | None = None  # most free space on any mount; None = unknown
-    mounts: list[dict] = []  # [{mount_point, free}] for per-path capacity checks
+    mounts: list[dict[str, Any]] = []  # [{mount_point, free}] for per-path capacity checks
     labels: dict[str, str] = {}
     worker_version: str | None = None
     gpu_name: str | None = None
@@ -90,7 +90,7 @@ class GPUStackClient:
         self._nets = [ipaddress.ip_network(c.strip()) for c in (allowed_cidrs or [])]
         self._roots = [r.strip().rstrip("/") for r in (cache_roots or []) if r.strip()]
 
-    async def _get(self, path: str, **params) -> dict:
+    async def _get(self, path: str, **params: Any) -> Any:  # JSON: shape is untrusted
         r = await self._http.get(
             f"{self._base}{path}", headers=self._headers, params=params, timeout=15
         )
@@ -98,7 +98,7 @@ class GPUStackClient:
         return r.json()
 
     @staticmethod
-    def _items(data) -> list:
+    def _items(data: Any) -> list[Any]:
         # PaginatedList -> {"items":[...]}. Branch on type FIRST (a bare list
         # has no .get); never call .get on a list.
         if isinstance(data, dict):
@@ -106,12 +106,12 @@ class GPUStackClient:
             return v if isinstance(v, list) else []  # {"items": null} -> [], not None
         return data if isinstance(data, list) else []
 
-    async def _list(self, path: str, per_page: int = 100, max_pages: int = 1000) -> list:
+    async def _list(self, path: str, per_page: int = 100, max_pages: int = 1000) -> list[Any]:
         """Fetch every page of a paginated GPUStack list. Uses the response's
         pagination metadata (so a server-side perPage cap doesn't truncate), with
         a hard page cap as a backstop against a server that ignores paging.
         Errors propagate — a fetch failure must NOT look like an empty result."""
-        out: list = []
+        out: list[Any] = []
         for page in range(1, max_pages + 1):
             data = await self._get(path, page=page, perPage=per_page)
             items = self._items(data)
@@ -120,7 +120,8 @@ class GPUStackClient:
             # crash the fetch, it just falls back to the short-page heuristic.
             total_pages = None
             if isinstance(data, dict):
-                pg = data.get("pagination") if isinstance(data.get("pagination"), dict) else {}
+                pg_raw = data.get("pagination")
+                pg = pg_raw if isinstance(pg_raw, dict) else {}
                 tp = _int_or_none(pg.get("totalPage")) or _int_or_none(pg.get("total_pages"))
                 total = _int_or_none(pg.get("total"))
                 if tp is not None:
@@ -253,7 +254,7 @@ class GPUStackClient:
         r.raise_for_status()
         return r.json().get("id")
 
-    async def get_model_file(self, model_file_id: int) -> dict | None:
+    async def get_model_file(self, model_file_id: int) -> dict[str, Any] | None:
         try:
             return await self._get(f"{self._v}/model-files/{model_file_id}")
         except httpx.HTTPError:
@@ -292,7 +293,7 @@ def _first_str(*vals) -> str | None:
     return None
 
 
-def _model_dir(mf: dict) -> str | None:
+def _model_dir(mf: dict[str, Any]) -> str | None:
     p = _first_str(mf.get("local_dir"), mf.get("local_path"))
     if not p:
         rps = mf.get("resolved_paths")
@@ -300,7 +301,7 @@ def _model_dir(mf: dict) -> str | None:
     return _as_dir(p) if p else None
 
 
-def _instance_dir(mi: dict) -> str | None:
+def _instance_dir(mi: dict[str, Any]) -> str | None:
     rp = _first_str(mi.get("resolved_path"), mi.get("local_path"))
     return _as_dir(rp) if rp else None
 
@@ -322,28 +323,31 @@ def _maintenance_on(m) -> bool:
     return bool(m.get("enabled")) if isinstance(m, dict) else bool(m)
 
 
-def _gpu_summary(status) -> dict:
-    out = {"gpu_name": None, "vram_total": 0, "vram_used": 0, "gpu_util": None}
-    if not isinstance(status, dict):
-        return out
-    devs = status.get("gpu_devices")
-    if not isinstance(devs, list) or not devs:
-        return out
-    utils = []
-    for gd in devs:
+def _gpu_summary(status: Any) -> dict[str, Any]:
+    name: str | None = None
+    vram_total = vram_used = 0
+    utils: list[float] = []
+    devs = status.get("gpu_devices") if isinstance(status, dict) else None
+    for gd in devs if isinstance(devs, list) else []:
         if not isinstance(gd, dict):
             continue
-        out["gpu_name"] = out["gpu_name"] or (gd.get("name") if isinstance(gd.get("name"), str) else None)
-        mem = gd.get("memory") if isinstance(gd.get("memory"), dict) else {}
-        out["vram_total"] += _int(mem.get("total"))
-        out["vram_used"] += _int(mem.get("used"))
-        core = gd.get("core") if isinstance(gd.get("core"), dict) else {}
+        if name is None and isinstance(gd.get("name"), str):
+            name = gd["name"]
+        mem = gd.get("memory")
+        mem = mem if isinstance(mem, dict) else {}
+        vram_total += _int(mem.get("total"))
+        vram_used += _int(mem.get("used"))
+        core = gd.get("core")
+        core = core if isinstance(core, dict) else {}
         u = _float_or_none(core.get("utilization_rate"))
         if u is not None:
             utils.append(u)
-    if utils:
-        out["gpu_util"] = round(sum(utils) / len(utils), 1)
-    return out
+    return {
+        "gpu_name": name,
+        "vram_total": vram_total,
+        "vram_used": vram_used,
+        "gpu_util": round(sum(utils) / len(utils), 1) if utils else None,
+    }
 
 
 def _under_roots(path: str, roots: list[str]) -> bool:
@@ -353,7 +357,7 @@ def _under_roots(path: str, roots: list[str]) -> bool:
     return any(p.startswith(r + "/") for r in roots)
 
 
-def _mounts(status) -> list[dict]:
+def _mounts(status: Any) -> list[dict[str, Any]]:
     if not isinstance(status, dict) or not isinstance(status.get("filesystem"), list):
         return []
     out = []
