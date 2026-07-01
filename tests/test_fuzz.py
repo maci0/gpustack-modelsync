@@ -130,3 +130,15 @@ def test_folder_status_parse_never_crashes(d):
     from modelsync.syncthing import parse_folder_status
     out = parse_folder_status(d)  # coerces raw Syncthing db/status JSON
     assert isinstance(out["global_bytes"], int) and out["completion"] >= 0.0
+
+
+folder_cfg = st.lists(st.dictionaries(
+    st.sampled_from(["id", "path", "label"]), json_val, max_size=3) | json_val, max_size=4)
+
+
+@settings(max_examples=300)
+@given(folder_cfg | json_val, st.tuples(st.text(max_size=12)))
+def test_owned_ids_never_crashes(folders, roots):
+    from modelsync.syncthing import owned_ids
+    out = owned_ids(folders, roots)
+    assert isinstance(out, set) and all(isinstance(x, str) for x in out)

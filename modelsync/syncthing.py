@@ -136,17 +136,7 @@ class SyncthingClient:
         ours — catches folders left by an earlier folder-id/label scheme). Never
         Syncthing's built-in 'default' or a folder outside the cache roots."""
         r = await self._req("GET", "/rest/config/folders")
-        out = set()
-        for f in r.json():
-            if f.get("id") == "default":
-                continue
-            path = (f.get("path") or "").rstrip("/")
-            under_root = any(
-                path == r0 or path.startswith(r0 + "/") for r0 in self._roots
-            )
-            if f.get("label") == OWNED_LABEL or under_root:
-                out.add(f["id"])
-        return out
+        return owned_ids(r.json(), self._roots)
 
     async def folder_status(self, folder_id: str) -> dict:
         """Rich per-folder state: completion %, sync state, bytes needed, error
@@ -158,6 +148,27 @@ class SyncthingClient:
 def _int(x) -> int:
     """Safe int for untrusted JSON: non-numeric (or bool) -> 0, never raises."""
     return int(x) if isinstance(x, (int, float)) and not isinstance(x, bool) else 0
+
+
+def owned_ids(folders, roots: tuple[str, ...]) -> set[str]:
+    """Folder ids GC may remove: ours by label, OR any folder whose path is under
+    a cache root. Pure + total over malformed config (non-dict entries, missing
+    id, non-str path all skipped) so GC can't crash on a bad folder list. Never
+    the built-in 'default' or a folder outside the roots."""
+    out: set[str] = set()
+    if not isinstance(folders, list):
+        return out
+    for f in folders:
+        if not isinstance(f, dict):
+            continue
+        fid = f.get("id")
+        if not isinstance(fid, str) or fid == "default":
+            continue
+        path = f.get("path").rstrip("/") if isinstance(f.get("path"), str) else ""
+        under_root = any(path == r0 or path.startswith(r0 + "/") for r0 in roots)
+        if f.get("label") == OWNED_LABEL or under_root:
+            out.add(fid)
+    return out
 
 
 def parse_folder_status(d) -> dict:
