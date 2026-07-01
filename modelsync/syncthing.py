@@ -27,10 +27,17 @@ LOCAL_ONLY_OPTIONS: dict = {
 
 
 class SyncthingClient:
-    def __init__(self, base_url: str, api_key: str, http: httpx.AsyncClient):
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        http: httpx.AsyncClient,
+        cache_roots: tuple[str, ...] = (),
+    ):
         self._base = base_url.rstrip("/")
         self._http = http
         self._headers = {"X-API-Key": api_key}
+        self._roots = tuple(r.rstrip("/") for r in cache_roots if r)
 
     async def _req(self, method: str, path: str, **kw) -> httpx.Response:
         r = await self._http.request(
@@ -117,10 +124,22 @@ class SyncthingClient:
             r.raise_for_status()
 
     async def owned_folders(self) -> set[str]:
-        """Folder ids WE created (label == OWNED_LABEL). GC only touches these,
-        never 'default' or folders the operator added for other uses."""
+        """Folder ids GC may remove: ours by label, OR any folder whose path is
+        under a configured cache root (on our dedicated sidecar, those are always
+        ours — catches folders left by an earlier folder-id/label scheme). Never
+        Syncthing's built-in 'default' or a folder outside the cache roots."""
         r = await self._req("GET", "/rest/config/folders")
-        return {f["id"] for f in r.json() if f.get("label") == OWNED_LABEL}
+        out = set()
+        for f in r.json():
+            if f.get("id") == "default":
+                continue
+            path = (f.get("path") or "").rstrip("/")
+            under_root = any(
+                path == r0 or path.startswith(r0 + "/") for r0 in self._roots
+            )
+            if f.get("label") == OWNED_LABEL or under_root:
+                out.add(f["id"])
+        return out
 
     async def folder_status(self, folder_id: str) -> dict:
         """Rich per-folder state: completion %, sync state, bytes needed, error

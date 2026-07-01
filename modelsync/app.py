@@ -104,6 +104,7 @@ def client_for(w: Worker) -> SyncthingClient:
         f"http://{w.ip}:{settings.syncthing_gui_port}",
         settings.syncthing_api_key,
         state.http,
+        tuple(r for r in settings.cache_roots.split(",") if r.strip()),
     )
 
 

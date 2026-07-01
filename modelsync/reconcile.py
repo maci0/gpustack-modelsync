@@ -110,6 +110,14 @@ async def reconcile(
                 for o in peers:
                     await c.put_device(dev_id[o], by_id[o].name, _addr(by_id[o], data_port))
                 await c.put_folder(fid, path, [dev_id[o] for o in peers], ftype)
+                if wid == src and src_confirmed:
+                    st = status.get(src)
+                    # Source idle but "needing" bytes = replicas diverge from it
+                    # (independent copies of the same model differ slightly). The
+                    # sendonly source won't pull, so it stays non-complete forever.
+                    # Override to make the source authoritative; replicas converge.
+                    if st and st["state"] == "idle" and st["need_bytes"] > 0:
+                        await c.override(fid)
                 if ftype == "receiveonly" and src_confirmed:
                     st = status.get(wid) or await c.folder_status(fid)
                     # Revert a diverged replica ONLY if it is incomplete and not

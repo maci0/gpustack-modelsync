@@ -8,10 +8,11 @@ class FakeSync:
     """Records calls the reconciler makes to one node. `compl`/`diverged` drive
     folder_status so we can exercise source-choice and revert-safety."""
 
-    def __init__(self, my, preset=(), compl=100.0, diverged=0, fail_status=False):
+    def __init__(self, my, preset=(), compl=100.0, diverged=0, need=0, fail_status=False):
         self.my = my
         self.compl = compl
         self.diverged = diverged
+        self.need = need
         self.fail_status = fail_status
         self.local_only = 0
         self.devices: list[str] = []
@@ -19,6 +20,7 @@ class FakeSync:
         self.types: dict[str, str] = {}
         self.deleted: list[str] = []
         self.reverted: list[str] = []
+        self.overridden: list[str] = []
 
     async def enforce_local_only(self):
         self.local_only += 1
@@ -46,12 +48,15 @@ class FakeSync:
             import httpx
             raise httpx.HTTPError("boom")
         g = 1 if self.compl > 0 else 0
-        return {"completion": self.compl, "complete": self.compl >= 100,
-                "state": "idle", "need_bytes": 0, "global_bytes": g,
+        return {"completion": self.compl, "complete": self.compl >= 100 and self.need == 0,
+                "state": "idle", "need_bytes": self.need, "global_bytes": g,
                 "errors": 0, "receive_only_changed": self.diverged}
 
     async def revert(self, fid):
         self.reverted.append(fid)
+
+    async def override(self, fid):
+        self.overridden.append(fid)
 
 
 def make(fakes):
@@ -76,6 +81,17 @@ async def test_meshes_source_sendonly_replica_receiveonly_and_gc():
     assert fakes[2].folders[fid] == ["DEV1"]
     assert fakes[3].deleted == [fid]              # orphan we own -> GC'd
     assert fid not in fakes[3].folders
+
+
+async def test_diverged_source_overrides_to_converge():
+    # source (confirmed holder) idle but needing bytes = a replica diverges from
+    # it; override makes the source authoritative so it can reach complete.
+    path = "/c/m"
+    workers = [W(1), W(2)]
+    fakes = {1: FakeSync("DEV1", compl=100, need=2087), 2: FakeSync("DEV2", compl=100)}
+    await reconcile({path: {1, 2}}, workers, make(fakes), have={path: {1}})
+    assert fakes[1].overridden == [folder_id(path)]  # source overrode
+    assert fakes[2].overridden == []                  # replica did not
 
 
 async def test_no_source_skips_path():

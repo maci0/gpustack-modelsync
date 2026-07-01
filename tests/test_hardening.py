@@ -76,6 +76,32 @@ def test_eligible_rejects_unknown_path():
     assert plan == {} and any("unknown model path" in x for x in warn)
 
 
+class _Resp:
+    def __init__(self, data):
+        self._d = data
+
+    def json(self):
+        return self._d
+
+
+async def test_owned_folders_by_label_or_cache_root():
+    from modelsync.syncthing import OWNED_LABEL, SyncthingClient
+
+    c = SyncthingClient("http://x", "k", None, cache_roots=("/var/lib/gpustack",))
+
+    async def fake_req(method, path, **k):
+        return _Resp([
+            {"id": "default", "label": "Default Folder", "path": "/var/syncthing/Sync"},
+            {"id": "new", "label": OWNED_LABEL, "path": "/var/lib/gpustack/cache/A"},
+            {"id": "old", "label": "old-id", "path": "/var/lib/gpustack/cache/A"},  # under root, stale label
+            {"id": "outside", "label": "x", "path": "/home/user/stuff"},           # not ours
+        ])
+
+    c._req = fake_req
+    owned = await c.owned_folders()
+    assert owned == {"new", "old"}  # default + outside-root excluded, stale-label orphan caught
+
+
 def _client():
     return GPUStackClient("http://x", "t", None)  # http unused; _get is patched
 
