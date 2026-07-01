@@ -143,6 +143,9 @@ class FakeReset:
     async def set_paused(self, fid, p):
         self.paused.append(p)
 
+    async def is_paused(self, fid):
+        return self.can_pause
+
     async def folder_status(self, fid):
         return {"state": "paused" if self.can_pause else "syncing"}
 
