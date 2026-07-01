@@ -261,16 +261,38 @@ class GPUStackClient:
             r.raise_for_status()
 
 
+# Safe coercion for untrusted GPUStack JSON: a wrong-typed field (string where a
+# number is expected, number where a path is expected) must degrade, not crash
+# the whole worker fetch. bool excluded (it is an int subclass).
+def _int(x) -> int:
+    return int(x) if isinstance(x, (int, float)) and not isinstance(x, bool) else 0
+
+
+def _int_or_none(x) -> int | None:
+    return int(x) if isinstance(x, (int, float)) and not isinstance(x, bool) else None
+
+
+def _float_or_none(x) -> float | None:
+    return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) else None
+
+
+def _first_str(*vals) -> str | None:
+    for v in vals:
+        if isinstance(v, str) and v:
+            return v
+    return None
+
+
 def _model_dir(mf: dict) -> str | None:
-    p = mf.get("local_dir") or mf.get("local_path")
+    p = _first_str(mf.get("local_dir"), mf.get("local_path"))
     if not p:
-        rps = mf.get("resolved_paths") or []
-        p = rps[0] if rps else None
+        rps = mf.get("resolved_paths")
+        p = next((x for x in rps if isinstance(x, str) and x), None) if isinstance(rps, list) else None
     return _as_dir(p) if p else None
 
 
 def _instance_dir(mi: dict) -> str | None:
-    rp = mi.get("resolved_path") or mi.get("local_path")
+    rp = _first_str(mi.get("resolved_path"), mi.get("local_path"))
     return _as_dir(rp) if rp else None
 
 
@@ -302,13 +324,14 @@ def _gpu_summary(status) -> dict:
     for gd in devs:
         if not isinstance(gd, dict):
             continue
-        out["gpu_name"] = out["gpu_name"] or gd.get("name")
-        mem = gd.get("memory") or {}
-        out["vram_total"] += int(mem.get("total") or 0)
-        out["vram_used"] += int(mem.get("used") or 0)
-        core = gd.get("core") or {}
-        if core.get("utilization_rate") is not None:
-            utils.append(float(core["utilization_rate"]))
+        out["gpu_name"] = out["gpu_name"] or (gd.get("name") if isinstance(gd.get("name"), str) else None)
+        mem = gd.get("memory") if isinstance(gd.get("memory"), dict) else {}
+        out["vram_total"] += _int(mem.get("total"))
+        out["vram_used"] += _int(mem.get("used"))
+        core = gd.get("core") if isinstance(gd.get("core"), dict) else {}
+        u = _float_or_none(core.get("utilization_rate"))
+        if u is not None:
+            utils.append(u)
     if utils:
         out["gpu_util"] = round(sum(utils) / len(utils), 1)
     return out
@@ -328,10 +351,10 @@ def _mounts(status) -> list[dict]:
     for m in status["filesystem"]:
         if not isinstance(m, dict):
             continue
-        free = m.get("free") if m.get("free") is not None else m.get("available")
-        mp = m.get("mount_point") or m.get("mountPoint")
+        free = _int_or_none(m.get("free") if m.get("free") is not None else m.get("available"))
+        mp = _first_str(m.get("mount_point"), m.get("mountPoint"))
         if mp and free is not None:
-            out.append({"mount_point": mp, "free": int(free)})
+            out.append({"mount_point": mp, "free": free})
     return out
 
 
@@ -356,9 +379,9 @@ def _max_free(status) -> int | None:
     if not isinstance(fs, list):
         return None
     frees = [
-        m.get("free") if m.get("free") is not None else m.get("available")
+        _int_or_none(m.get("free") if m.get("free") is not None else m.get("available"))
         for m in fs
         if isinstance(m, dict)
     ]
-    frees = [int(f) for f in frees if f is not None]
+    frees = [f for f in frees if f is not None]
     return max(frees) if frees else None

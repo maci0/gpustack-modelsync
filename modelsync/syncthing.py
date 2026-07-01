@@ -152,26 +152,38 @@ class SyncthingClient:
         """Rich per-folder state: completion %, sync state, bytes needed, error
         count. Surfaces problems a bare % hides (a stuck folder shows error)."""
         r = await self._req("GET", "/rest/db/status", params={"folder": folder_id})
-        d = r.json()
-        g = int(d.get("globalBytes") or 0)
-        need = int(d.get("needBytes") or 0)
-        state = d.get("state", "unknown")
-        # globalBytes==0 means we have NOT yet learned the folder's contents (no
-        # index/scan): "unknown", NOT done. And only call it complete once the
-        # folder is idle, so a mid-scan (g>0,need==0 transient) doesn't register
-        # an incomplete model as present.
-        complete = g > 0 and need == 0 and state == "idle"
-        pct = 0.0 if g == 0 else max(0.0, (g - need) / g * 100.0)
-        return {
-            "completion": pct,
-            "complete": complete,
-            "state": state,
-            "need_bytes": need,
-            "global_bytes": g,
-            # bytes actually present locally on disk (for integrity vs GPUStack's
-            # expected model size — a poisoned global can't fake this).
-            "local_bytes": int(d.get("localBytes") or 0),
-            "errors": int(d.get("errors") or 0) + int(d.get("pullErrors") or 0),
-            # receive-only divergence: local files not matching the source.
-            "receive_only_changed": int(d.get("receiveOnlyChangedBytes") or 0),
-        }
+        return parse_folder_status(r.json())
+
+
+def _int(x) -> int:
+    """Safe int for untrusted JSON: non-numeric (or bool) -> 0, never raises."""
+    return int(x) if isinstance(x, (int, float)) and not isinstance(x, bool) else 0
+
+
+def parse_folder_status(d) -> dict:
+    """Coerce raw Syncthing db/status JSON into our status dict. Pure + total:
+    any malformed field degrades to a safe default rather than raising."""
+    if not isinstance(d, dict):
+        d = {}
+    g = _int(d.get("globalBytes"))
+    need = _int(d.get("needBytes"))
+    state = d.get("state") if isinstance(d.get("state"), str) else "unknown"
+    # globalBytes==0 means we have NOT yet learned the folder's contents (no
+    # index/scan): "unknown", NOT done. And only call it complete once the folder
+    # is idle, so a mid-scan (g>0,need==0 transient) doesn't register an
+    # incomplete model as present.
+    complete = g > 0 and need == 0 and state == "idle"
+    pct = 0.0 if g == 0 else max(0.0, (g - need) / g * 100.0)
+    return {
+        "completion": pct,
+        "complete": complete,
+        "state": state,
+        "need_bytes": need,
+        "global_bytes": g,
+        # bytes actually present locally on disk (for integrity vs GPUStack's
+        # expected model size — a poisoned global can't fake this).
+        "local_bytes": _int(d.get("localBytes")),
+        "errors": _int(d.get("errors")) + _int(d.get("pullErrors")),
+        # receive-only divergence: local files not matching the source.
+        "receive_only_changed": _int(d.get("receiveOnlyChangedBytes")),
+    }
