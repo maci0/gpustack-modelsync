@@ -80,6 +80,24 @@ def _client():
     return GPUStackClient("http://x", "t", None)  # http unused; _get is patched
 
 
+async def test_model_folders_size_max_across_nodes_sum_within():
+    gp = _client()
+
+    async def fake_list(path, **k):
+        return [
+            {"local_dir": "/var/lib/gpustack/A", "worker_id": 7, "size": 100},
+            {"local_dir": "/var/lib/gpustack/A", "worker_id": 8, "size": 100},  # same model, 2nd node
+            {"local_dir": "/var/lib/gpustack/B", "worker_id": 7, "size": 30},   # sharded on one node
+            {"local_dir": "/var/lib/gpustack/B", "worker_id": 7, "size": 40},
+        ]
+
+    gp._list = fake_list
+    byp = {f.path: f for f in await gp.model_folders()}
+    assert byp["/var/lib/gpustack/A"].size == 100  # max across nodes, NOT 200
+    assert byp["/var/lib/gpustack/A"].current_nodes == [7, 8]
+    assert byp["/var/lib/gpustack/B"].size == 70   # summed within a node
+
+
 async def test_list_stops_on_short_page():
     gp, calls = _client(), []
 

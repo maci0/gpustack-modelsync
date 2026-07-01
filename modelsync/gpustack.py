@@ -165,7 +165,10 @@ class GPUStackClient:
 
     async def model_folders(self) -> list[ModelFolder]:
         nodes: dict[str, set[int]] = {}
-        size: dict[str, int] = {}
+        # size per (path, worker): sum shards WITHIN a worker, then take the max
+        # ACROSS workers — the model size is one full copy, not the total of every
+        # node's copy (summing across nodes would report N× the real size).
+        size_bw: dict[str, dict[int, int]] = {}
         spec: dict[str, dict[str, str]] = {}
         for mf in await self._list(f"{self._v}/model-files"):
             path = _model_dir(mf)
@@ -175,17 +178,18 @@ class GPUStackClient:
                 log.warning("model path %s outside cache roots, ignoring", path)
                 continue
             nodes.setdefault(path, set())
-            # sum: a dir may be backed by several model-files (sharded weights)
-            size[path] = size.get(path, 0) + int(mf.get("size") or 0)
-            spec.setdefault(path, {k: mf[k] for k in _SPEC_KEYS if mf.get(k)})
             wid = mf.get("worker_id")
+            bucket = size_bw.setdefault(path, {})
+            key = wid if wid is not None else -1
+            bucket[key] = bucket.get(key, 0) + int(mf.get("size") or 0)
+            spec.setdefault(path, {k: mf[k] for k in _SPEC_KEYS if mf.get(k)})
             if wid is not None:
                 nodes[path].add(wid)
         return [
             ModelFolder(
                 path=p,
                 label=os.path.basename(p) or p,
-                size=size.get(p, 0),
+                size=max(size_bw.get(p, {}).values(), default=0),
                 current_nodes=sorted(w),
                 spec=spec.get(p, {}),
             )
