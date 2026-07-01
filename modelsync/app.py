@@ -397,6 +397,7 @@ async def nodes() -> list[Worker]:
 async def models() -> list[dict]:
     folders = await state.gpustack.model_folders()
     instances = await state.gpustack.model_instances()
+    plan = dict(state.plan)  # snapshot for a consistent read vs a concurrent apply
     serving: dict[str, set[int]] = {}
     for mi in instances:
         if mi.local_dir and mi.worker_id is not None:
@@ -406,7 +407,7 @@ async def models() -> list[dict]:
             "path": f.path,
             "label": f.label,
             "size": f.size,
-            "nodes": sorted(state.plan.get(f.path, set())),  # checkbox = plan
+            "nodes": sorted(plan.get(f.path, set())),  # checkbox = plan
             "have": f.current_nodes,
             "serving": sorted(serving.get(f.path, set())),
         }
@@ -494,6 +495,8 @@ async def reset(body: ResetIn) -> dict:
     per-path guard so the background loop won't touch the same folder meanwhile —
     avoids both a race and freezing all orchestration behind one reset."""
     path = body.path
+    if path not in state.plan:
+        return {"ok": False, "error": "path not in current plan"}
     async with state.lock:
         await _reconcile_core(state.plan)  # ensure folders wired
         workers = await state.gpustack.workers()
@@ -589,7 +592,7 @@ async def status() -> list[dict]:
     workers = await state.gpustack.workers()
     folders = await state.gpustack.model_folders()
     exp = {f.path: f.size for f in folders}
-    rows = await collect_status(state.plan, workers, client_for)
+    rows = await collect_status(dict(state.plan), workers, client_for)  # snapshot
     # clean = Syncthing-verified self-consistent copy; expected_bytes = GPUStack's
     # weights-only size (shown for reference, not used to judge integrity).
     return [{**r.__dict__, "expected_bytes": exp.get(r.path, 0), "clean": r.clean} for r in rows]
@@ -598,9 +601,10 @@ async def status() -> list[dict]:
 @app.get("/suggest", dependencies=[Depends(require_auth)])
 async def suggest() -> list[dict]:
     instances = await state.gpustack.model_instances()
+    plan = dict(state.plan)  # snapshot
     out = []
     for mi in instances:
-        if mi.local_dir and mi.worker_id is not None and mi.worker_id not in state.plan.get(mi.local_dir, set()):
+        if mi.local_dir and mi.worker_id is not None and mi.worker_id not in plan.get(mi.local_dir, set()):
             out.append({"path": mi.local_dir, "worker_id": mi.worker_id})
     return out
 
