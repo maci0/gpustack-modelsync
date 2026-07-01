@@ -498,29 +498,32 @@ async def reset(body: ResetIn) -> dict:
     if path not in state.plan:
         return {"ok": False, "error": "path not in current plan"}
     async with state.lock:
-        await _reconcile_core(state.plan)  # ensure folders wired
-        workers = await state.gpustack.workers()
-        by_id = {w.id: w for w in workers}
-        folders = await state.gpustack.model_folders()
-        have = {f.path: set(f.current_nodes) for f in folders}
-        targets = sorted(t for t in state.plan.get(path, set()) if (w := by_id.get(t)) and w.syncable)
-        fid = folder_id(path)
-        # Integrity-first source (same as reconcile): a CLEAN verified copy, not
-        # just the lowest GPUStack holder — never override from a poisoned node.
-        status: dict[int, dict | None] = {}
-        for t in targets:
-            try:
-                status[t] = await client_for(by_id[t]).folder_status(fid)
-            except httpx.HTTPError:
-                status[t] = None
-        src = _choose_source(targets, have.get(path, set()), status)
+        if path in state.resetting:  # per-path mutex: no two concurrent resets
+            return {"ok": False, "error": "reset already in progress for this path"}
+        state.resetting.add(path)  # claim; try/finally below always releases it
+    try:
+        async with state.lock:  # setup under the lock; recovery below runs outside
+            await _reconcile_core(state.plan)  # ensure folders wired
+            workers = await state.gpustack.workers()
+            by_id = {w.id: w for w in workers}
+            folders = await state.gpustack.model_folders()
+            have = {f.path: set(f.current_nodes) for f in folders}
+            targets = sorted(t for t in state.plan.get(path, set()) if (w := by_id.get(t)) and w.syncable)
+            fid = folder_id(path)
+            # Integrity-first source (same as reconcile): a CLEAN verified copy,
+            # not just the lowest GPUStack holder — never override a poisoned node.
+            status: dict[int, dict | None] = {}
+            for t in targets:
+                try:
+                    status[t] = await client_for(by_id[t]).folder_status(fid)
+                except httpx.HTTPError:
+                    status[t] = None
+            src = _choose_source(targets, have.get(path, set()), status)
         if src is None:
             return {"ok": False, "error": "no reachable source node holds this model"}
-        state.resetting.add(path)  # background loop skips this folder while set
 
-    replicas = [t for t in targets if t != src]
-    actions: list[str] = []
-    try:
+        replicas = [t for t in targets if t != src]
+        actions: list[str] = []
         # Source completion gates override; only override a complete source, else
         # it could propagate an empty/stale copy and wipe good replicas.
         src_compl = (status[src] or {}).get("completion", 0.0)
