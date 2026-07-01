@@ -345,7 +345,7 @@ def _prune_plan(plan: dict[str, set[int]], known_paths: set[str]) -> dict[str, s
 async def _background_loop() -> None:
     while True:
         try:
-            await asyncio.sleep(settings.reconcile_interval)
+            await asyncio.sleep(max(1, settings.reconcile_interval))  # floor: never spin
             await reconcile_all()
         except asyncio.CancelledError:
             raise

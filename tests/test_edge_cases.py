@@ -199,6 +199,13 @@ async def test_24_model_folders_bad_size():
     assert len(r) == 1 and r[0].size == 0
 
 
+# 27. api_prefix normalized to leading-slash regardless of how it's configured
+def test_27_api_prefix_normalized():
+    for pfx in ("/v2", "v2", "v2/", "/v2/"):
+        gp = GPUStackClient("http://host/", "t", None, api_prefix=pfx)
+        assert gp._base == "http://host" and gp._v == "/v2"
+
+
 # 26. save works on a fresh nested STATE dir (lifespan mkdir prevents apply crash)
 def test_26_state_dir_created(tmp_path, monkeypatch):
     d = tmp_path / "sub" / "state"          # does not exist yet

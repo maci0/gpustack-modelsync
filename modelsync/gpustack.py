@@ -81,7 +81,10 @@ class GPUStackClient:
         cache_roots: list[str] | None = None,
     ):
         self._base = base_url.rstrip("/")
-        self._v = api_prefix.rstrip("/")
+        # Normalize to a leading-slash, no-trailing-slash prefix so a value like
+        # "v2" (no slash) can't produce "http://hostv2/workers".
+        p = api_prefix.strip("/")
+        self._v = f"/{p}" if p else ""
         self._http = http
         self._headers = {"Authorization": f"Bearer {token}"}
         self._nets = [ipaddress.ip_network(c.strip()) for c in (allowed_cidrs or [])]
