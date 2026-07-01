@@ -136,7 +136,7 @@ class GPUStackClient:
         return any(addr in n for n in self._nets)
 
     async def workers(self) -> list[Worker]:
-        out: list[Worker] = []
+        by_id: dict[int, Worker] = {}  # dedup: pagination churn can repeat a worker
         for w in await self._list(f"{self._v}/workers"):
             wid, ip = w.get("id"), w.get("ip")
             if wid is None or not ip:
@@ -145,7 +145,7 @@ class GPUStackClient:
                 log.warning("worker %s ip %s outside allowed CIDRs, skipping", wid, ip)
                 continue
             gpu = _gpu_summary(w.get("status"))
-            out.append(
+            by_id[wid] = (
                 Worker(
                     id=wid,
                     name=w.get("name") or w.get("hostname") or str(wid),
@@ -161,7 +161,7 @@ class GPUStackClient:
                     **gpu,
                 )
             )
-        return out
+        return list(by_id.values())
 
     async def model_folders(self) -> list[ModelFolder]:
         nodes: dict[str, set[int]] = {}

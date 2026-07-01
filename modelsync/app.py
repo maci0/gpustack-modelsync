@@ -79,7 +79,7 @@ def load_registry() -> dict[str, int]:
     out = {}
     for k, v in raw.items():
         wid_s = k.split("@", 1)[0] if isinstance(k, str) else ""
-        if wid_s.lstrip("-").isdigit() and isinstance(v, int) and not isinstance(v, bool):
+        if wid_s.isdigit() and isinstance(v, int) and not isinstance(v, bool):  # positive ids only
             out[k] = v  # drop malformed keys instead of crashing later on int()
         else:
             log.warning("dropping malformed registry key %r", k)
