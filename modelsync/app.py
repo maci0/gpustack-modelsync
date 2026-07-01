@@ -163,6 +163,9 @@ async def lifespan(app: FastAPI):
         [c for c in settings.allowed_worker_cidrs.split(",") if c.strip()],
         [r for r in settings.cache_roots.split(",") if r.strip()],
     )
+    # Create the state dir up front so the first apply can't crash on a missing
+    # STATE_DIR (misconfigured/unmounted volume) — fail clearly at startup instead.
+    STATE.mkdir(parents=True, exist_ok=True)
     state.plan = load_plan()
     state.registry = load_registry()
     state.members = load_members()

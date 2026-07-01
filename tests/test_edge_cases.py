@@ -199,6 +199,16 @@ async def test_24_model_folders_bad_size():
     assert len(r) == 1 and r[0].size == 0
 
 
+# 26. save works on a fresh nested STATE dir (lifespan mkdir prevents apply crash)
+def test_26_state_dir_created(tmp_path, monkeypatch):
+    d = tmp_path / "sub" / "state"          # does not exist yet
+    monkeypatch.setattr(A, "STATE", d)
+    monkeypatch.setattr(A, "PLAN_FILE", d / "plan.json")
+    d.mkdir(parents=True, exist_ok=True)    # what lifespan does before any save
+    A.save_plan({"/m": {1}})
+    assert (d / "plan.json").exists()
+
+
 # 25. _eligible: holder kept; maintenance / capacity / stale-id / unknown-path all warned
 def test_25_eligible_branches():
     from modelsync.app import _eligible
