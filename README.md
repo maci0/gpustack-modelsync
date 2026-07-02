@@ -10,7 +10,7 @@ Syncthing instance on each worker over its REST API so that each model folder is
 shared with exactly the nodes you chose.
 
 ```
-GPUStack server ──/v1/workers──▶ orchestrator ──Syncthing REST──▶ syncthing on each worker
+GPUStack server ──/v2/workers──▶ orchestrator ──Syncthing REST──▶ syncthing on each worker
                                       │                              (P2P replicates cache-dir subfolders)
                                   matrix UI: model × node + sync %
 ```

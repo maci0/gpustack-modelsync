@@ -10,7 +10,6 @@ import os
 import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import httpx
@@ -99,21 +98,22 @@ async def main() -> int:
 
             await cli["a"].put_folder("model1", str(fdir["a"]), [ids["b"]])
             await cli["b"].put_folder("model1", str(fdir["b"]), [ids["a"]])
-            print("device + folder wiring OK; folders:", await cli["a"].folder_ids())
+            print("device + folder wiring OK; owned:", await cli["a"].owned_folders())
 
             print("waiting for replication A->B ...")
             for _ in range(60):
-                pct = await cli["b"].completion("model1")
-                if (fdir["b"] / "weights.bin").exists() and pct >= 100:
-                    print(f"replicated OK, B completion={pct:.0f}%")
+                st = await cli["b"].folder_status("model1")
+                if (fdir["b"] / "weights.bin").exists() and st["complete"]:
+                    print(f"replicated OK, B completion={st['completion']:.0f}%")
                     ok = True
                     break
-                time.sleep(1)
+                await asyncio.sleep(1)
             if not ok:
-                print(f"NOT replicated, B completion={await cli['b'].completion('model1'):.0f}%")
+                st = await cli["b"].folder_status("model1")
+                print(f"NOT replicated, B completion={st['completion']:.0f}% state={st['state']}")
 
             await cli["a"].delete_folder("model1")
-            assert "model1" not in await cli["a"].folder_ids()
+            assert "model1" not in await cli["a"].owned_folders()
             assert (fdir["a"] / "weights.bin").exists(), "unshare deleted local files!"
             print("unshare keeps local files OK")
     finally:

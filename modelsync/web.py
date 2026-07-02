@@ -90,13 +90,17 @@ const jpost=(u,body)=>api(u,{method:'POST',headers:{'content-type':'application/
 // (end of in-page app; the Tampermonkey build lives in USERSCRIPT below)
 
 async function loadNodes(){
-  nodes=await jget('/nodes');
+  try{ nodes=await jget('/nodes'); }catch(e){ return; }  // transient: keep last view
   const cs=[...new Set(nodes.map(n=>n.cluster_id))];
   const sel=$('cluster'),cur=sel.value;
   sel.innerHTML=cs.map(c=>`<option value="${esc(c)}">cluster ${esc(c)}</option>`).join('');
   if(cs.map(String).includes(cur))sel.value=cur;
 }
-async function loadModels(){ if(dirty)return; models=await jget('/models'); render(); }
+async function loadModels(){
+  if(dirty)return;                       // never clobber unsaved ticks
+  try{ models=await jget('/models'); }catch(e){ return; }
+  render();
+}
 function nodeHead(n){
   const cls=n.state==='ready'?'s-ready':(n.unreachable||n.state==='maintenance'?'s-bad':'s-warn');
   const vram=n.vram_total?`<div class="nfree">VRAM ${gib(n.vram_used)}/${gib(n.vram_total)}${n.gpu_util!=null?' · '+esc(n.gpu_util)+'%':''}</div>`:'';
@@ -123,19 +127,27 @@ async function apply(){
   const plan={};
   document.querySelectorAll('#body input:checked').forEach(c=>{(plan[c.dataset.m]=plan[c.dataset.m]||[]).push(+c.dataset.n);});
   $('msg').textContent='applying…';$('apply').disabled=true;
-  const r=await jpost('/plan',{plan});
-  const parts=[];
-  if(r.added&&r.added.length)   parts.push(`added ${r.added.length} (${r.added.map(esc).join(', ')})`);
-  if(r.removed&&r.removed.length)parts.push(`removed ${r.removed.length} — unshared + deregistered (${r.removed.map(esc).join(', ')})`);
-  if(r.warnings&&r.warnings.length) parts.push('⚠ '+r.warnings.map(esc).join(' · '));
-  $('msg').innerHTML = parts.length ? parts.join(' · ') : 'no changes';
-  dirty=false;$('apply').textContent='Apply';$('apply').disabled=false;
+  try{
+    const r=await jpost('/plan',{plan});
+    const parts=[];
+    if(r.added&&r.added.length)   parts.push(`added ${r.added.length} (${r.added.map(esc).join(', ')})`);
+    if(r.removed&&r.removed.length)parts.push(`removed ${r.removed.length} — unshared + deregistered (${r.removed.map(esc).join(', ')})`);
+    if(r.warnings&&r.warnings.length) parts.push('⚠ '+r.warnings.map(esc).join(' · '));
+    $('msg').innerHTML = parts.length ? parts.join(' · ') : 'no changes';
+    dirty=false;
+  }catch(e){
+    $('msg').textContent='apply failed: '+e.message+' — your ticks are kept, retry';
+  }finally{
+    $('apply').textContent=dirty?'Apply *':'Apply';$('apply').disabled=false;  // never leave it bricked
+  }
   await loadModels(); poll();
 }
 async function reset(path){
   $('msg').textContent='resetting '+esc(path.split('/').pop())+'…';
-  const r=await jpost('/reset',{path});
-  $('msg').textContent = r.ok===false ? ('reset: '+esc(r.error||'failed')) : ('reset → '+((r.actions||[]).map(esc).join(' · ')||'no targets'));
+  try{
+    const r=await jpost('/reset',{path});
+    $('msg').textContent = r.ok===false ? ('reset: '+esc(r.error||'failed')) : ('reset → '+((r.actions||[]).map(esc).join(' · ')||'no targets'));
+  }catch(e){ $('msg').textContent='reset failed: '+e.message; }
   poll();
 }
 async function poll(){
@@ -256,6 +268,7 @@ const vn=()=>nodes.filter(n=>String(n.cluster_id)===cl.value);
 function setMsg(t){msg.textContent=t;}
 
 async function load(){
+  if(dirty){poll();return;}          // never clobber unsaved ticks (e.g. panel reopen)
   try{nodes=await gm('GET','/nodes');models=await gm('GET','/models');}
   catch(e){setMsg('error: '+e.message);return;}
   const cs=[...new Set(nodes.map(n=>n.cluster_id))];const cur=cl.value;

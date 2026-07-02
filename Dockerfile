@@ -1,6 +1,7 @@
 # Orchestrator only. The per-worker Syncthing uses the official
 # syncthing/syncthing image (see docker-compose.yml / k8s.yaml).
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+# python3.13 = same interpreter the test/type gates run on (no version skew)
+FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
 
 WORKDIR /app
 # HOME + cache under /app so the non-root user can write them (no /home/app).

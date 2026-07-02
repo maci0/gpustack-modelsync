@@ -58,6 +58,14 @@ def test_6choose_source_two_clean_deterministic():
     assert choose_source([3, 1, 2], set(), {1: st(), 2: st(), 3: st()}) == 1
 
 
+# 6b. no confirmed holder, no clean copy -> fall back to highest completion
+def test_6b_choose_source_completion_fallback():
+    lo = st(complete=False, need=60, local=40, global_bytes=100, completion=40.0)
+    hi = st(complete=False, need=30, local=70, global_bytes=100, completion=70.0)
+    assert choose_source([1, 2], set(), {1: lo, 2: hi}) == 2   # most-complete wins
+    assert choose_source([1, 2], set(), {1: None, 2: None}) is None  # nobody has data
+
+
 # 7. poisoned copy (local != global) is not clean
 def test_7_is_clean_rejects_poison():
     assert not _is_clean(st(local_bytes=200, global_bytes=100))
@@ -129,6 +137,18 @@ def test_16_maintenance_on():
 async def test_17_collect_status_missing_worker(monkeypatch):
     rows = await collect_status({"/m": {1, 99}}, [W(1)], lambda w: _FakeSt())
     assert {r.worker_id for r in rows} == {1}   # 99 has no Worker -> skipped
+
+
+# 17b. collect_status: unreachable node -> a row with state 'unreachable', not a crash
+async def test_17b_collect_status_unreachable_row():
+    import httpx
+
+    class Boom:
+        async def folder_status(self, fid):
+            raise httpx.HTTPError("down")
+
+    rows = await collect_status({"/m": {1}}, [W(1)], lambda w: Boom())
+    assert len(rows) == 1 and rows[0].state == "unreachable" and rows[0].completion == 0.0
 
 
 # 18. load_registry rejects negative / non-numeric worker ids

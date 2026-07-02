@@ -43,9 +43,10 @@ class Settings(BaseSettings):
     auth_token: str = ""
 
     # Only talk to workers whose IP is in these CIDRs (SSRF guard: a worker's IP
-    # comes from GPUStack and we send the shared Syncthing key to it). Loopback
-    # is NOT included by default — add 127.0.0.0/8 explicitly for single-host dev.
-    allowed_worker_cidrs: str = "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+    # comes from GPUStack and we send the shared Syncthing key to it). Defaults =
+    # the private ranges, v4 and v6 (fc00::/7 = unique-local). Loopback is NOT
+    # included — add 127.0.0.0/8 explicitly for single-host dev.
+    allowed_worker_cidrs: str = "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7"
 
     # Only sync model dirs under these roots — rejects an arbitrary path from a
     # compromised/buggy GPUStack from being stood up as a Syncthing share on a

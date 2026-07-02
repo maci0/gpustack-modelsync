@@ -3,6 +3,8 @@ end-to-end on the live cluster). Fakes GPUStack + Syncthing to exercise the
 logic: register a completed copy, deregister a removed one, and the id-verify
 guard that prevents deleting the wrong model-file."""
 
+import httpx
+
 import modelsync.app as A
 from modelsync.gpustack import ModelFolder, Worker
 
@@ -35,12 +37,17 @@ def _status(complete=True, need=0, local=100, glob=100, state="idle", roc=0):
 
 
 class FakeSt:
-    def __init__(self, complete=True, status=None):
+    def __init__(self, complete=True, status=None, fail_at=None):
         self.st = status if status is not None else _status(complete=complete)
         self.overrode = self.reverted = False
+        self.fail_at = fail_at  # "enforce" | "put_folder" | "owned" -> raises there
+
+    def _maybe_fail(self, where):
+        if self.fail_at == where:
+            raise httpx.HTTPError(f"down@{where}")
 
     async def enforce_local_only(self):
-        pass
+        self._maybe_fail("enforce")
 
     async def my_id(self):
         return f"DEV{id(self) % 1000}"
@@ -49,9 +56,10 @@ class FakeSt:
         pass
 
     async def put_folder(self, *a, **k):
-        pass
+        self._maybe_fail("put_folder")
 
     async def owned_folders(self):
+        self._maybe_fail("owned")
         return set()
 
     async def delete_folder(self, fid):
@@ -134,7 +142,36 @@ async def test_resolves_stuck_folder_from_clean_copy(monkeypatch):
 
 async def _run_reconcile(sts, have):
     from modelsync.reconcile import reconcile
-    await reconcile({"/m": {1, 2}}, [W(1), W(2)], lambda w: sts[w.id], 22000, {"/m": have})
+    return await reconcile({"/m": {1, 2}}, [W(1), W(2)], lambda w: sts[w.id], 22000, {"/m": have})
+
+
+async def test_reconcile_marks_node_unreachable_at_handshake():
+    src = FakeSt(status=_status(complete=True))
+    dead = FakeSt(fail_at="enforce")                 # fails device handshake
+    unreachable, _ = await _run_reconcile({1: src, 2: dead}, {1})
+    assert unreachable == [2]                         # reported, not fatal
+
+
+async def test_reconcile_marks_node_unreachable_at_put_folder():
+    src = FakeSt(status=_status(complete=True))
+    rep = FakeSt(status=_status(complete=False, need=50, local=0, glob=100), fail_at="put_folder")
+    unreachable, _ = await _run_reconcile({1: src, 2: rep}, {1})
+    assert 2 in unreachable                           # wiring failure -> unreachable, no crash
+
+
+async def test_reconcile_handles_gc_failure():
+    src = FakeSt(status=_status(complete=True), fail_at="owned")  # GC listing fails
+    rep = FakeSt(status=_status(complete=True))
+    unreachable, _ = await _run_reconcile({1: src, 2: rep}, {1})
+    assert 1 in unreachable                           # GC error -> node unreachable, not fatal
+
+
+async def test_reconcile_skips_path_with_all_targets_unreachable():
+    from modelsync.reconcile import reconcile
+    a, b = FakeSt(fail_at="enforce"), FakeSt(fail_at="enforce")
+    unreachable, _ = await reconcile(
+        {"/m": {1, 2}}, [W(1), W(2)], lambda w: {1: a, 2: b}[w.id], 22000, {"/m": {1}})
+    assert set(unreachable) == {1, 2}                 # both dead -> path skipped, no crash
 
 
 # revert guard (data-loss-critical): a diverged, incomplete, less-complete replica

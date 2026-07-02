@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
 import asyncio
 import json
 import logging
@@ -8,17 +7,17 @@ import os
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 import uvicorn
-from urllib.parse import urlparse
-
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from .config import settings
-from .gpustack import GPUStackClient, Worker, free_for_path
+from .gpustack import GPUStackClient, ModelFolder, Worker, free_for_path
 from .reconcile import choose_source, collect_status, folder_id, reconcile
 from .syncthing import SyncthingClient
 from .web import PAGE, SCRIPT, USERSCRIPT
@@ -190,7 +189,11 @@ app = FastAPI(title="gpustack-modelsync", lifespan=lifespan)
 # ---- core automation (assumes state.lock held) ----------------------------
 
 
-async def _reconcile_core(plan: dict[str, set[int]], workers=None, folders=None) -> dict[str, Any]:
+async def _reconcile_core(
+    plan: dict[str, set[int]],
+    workers: list[Worker] | None = None,
+    folders: list[ModelFolder] | None = None,
+) -> dict[str, Any]:
     if workers is None:
         workers = await state.gpustack.workers()
     if folders is None:
@@ -423,7 +426,11 @@ class PlanIn(BaseModel):
     plan: dict[str, list[int]]
 
 
-def _eligible(requested, workers, folders) -> tuple[dict[str, set[int]], list[str]]:
+def _eligible(
+    requested: dict[str, set[int]],
+    workers: list[Worker],
+    folders: list[ModelFolder],
+) -> tuple[dict[str, set[int]], list[str]]:
     by_id = {w.id: w for w in workers}
     known = {f.path for f in folders}
     size = {f.path: f.size for f in folders}

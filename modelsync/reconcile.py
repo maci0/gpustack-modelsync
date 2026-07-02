@@ -1,10 +1,11 @@
 """Reconcile a desired plan (model path -> set of node ids) into Syncthing.
 
-Distribution is master->replica: the node that actually holds the model is the
-`sendonly` source; the rest are `receiveonly` replicas, reverted to converge.
-Source is chosen from real holders only (GPUStack's view, else Syncthing
-completion) — never an empty node — and a replica is never reverted toward a
-LESS-complete source, so a real copy is never wiped.
+Distribution is master->replica: the authoritative node is the `sendonly`
+source; the rest are `receiveonly` replicas, reverted to converge. The source is
+chosen integrity-first (see choose_source): a Syncthing-verified CLEAN copy
+(complete, idle, no errors, no divergence, local==global) beats GPUStack's
+possibly-stale holder list; never an empty node. A replica is never reverted
+toward a less-complete source, so a real copy is never wiped.
 """
 
 from __future__ import annotations
