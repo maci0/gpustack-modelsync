@@ -90,25 +90,27 @@ PAGE = """<!doctype html>
  .b-err{color:#cf1322;background:#fff2f0;border-color:#ffa39e}
  .empty{color:var(--mut);padding:34px;text-align:center}
  .b-dl{color:#0068d6;background:#e6f4ff;border-color:#91caff}  /* GPUStack downloading */
- /* Dark mode: gpustack-ui dark tokens (dark.ts + global.less) — auto by OS pref. */
+ /* Dark mode: exact gpustack-ui realDark tokens (dark.ts + global.less
+    data-theme='realDark'): page #141414, container #1f1f1f, border #3a3a3a,
+    text #ccc, row-hover/tag #272727, success #48A77E, primary #007BFF. */
  @media (prefers-color-scheme: dark){
-  :root{--bg:#141414;--card:#1f1f1f;--fg:rgba(255,255,255,.85);--mut:rgba(255,255,255,.45);
-    --line:#303030;--acc:#007BFF;--acc-d:#3d9bff;--tint:#111d2e;--ok:#48A77E;--warn:#d89614;--bad:#dc4446}
+  :root{--bg:#141414;--card:#1f1f1f;--fg:#ccc;--mut:rgba(255,255,255,.45);
+    --line:#3a3a3a;--acc:#007BFF;--acc-d:#3d9bff;--tint:#111d2e;--ok:#48A77E;--warn:#d89614;--bad:#dc4446}
   body{background:#141414}
   select,button,#q,.reset,.cpy,.purge{border-color:#3a3a3a}
   select,#q{background:#1f1f1f;color:var(--fg)}
-  thead th{background:#1f1f1f;border-bottom-color:#303030}
+  thead th{background:#1f1f1f;border-bottom-color:#3a3a3a}
   tfoot td,tfoot td:first-child{background:#181818}
   th:first-child,td:first-child{background:var(--card)}
-  tbody tr:hover,tbody tr:hover td:first-child{background:#262626}
+  tbody tr:hover,tbody tr:hover td:first-child{background:#272727}
   tr.dirtyrow td,tr.dirtyrow td:first-child{background:#2b2716}
   tr.dirtyrow:hover td,tr.dirtyrow:hover td:first-child{background:#332f18}
   .bar,.hbar,.msT .bar{background:#333}
   .mname{color:#dad8d2}
-  .b-present{color:#7ee2b8;background:#0f2a1e;border-color:#1f5c40}
-  .b-serving,.b-dl{color:#8cc8ff;background:#0f2036;border-color:#1f4a80}
+  .b-present{color:#7ee2b8;background:#12271d;border-color:#2a5c44}  /* success #48A77E family */
+  .b-serving,.b-dl{color:#8cc8ff;background:#111d2e;border-color:#1f4a80}
   .b-pending{color:#e8b339;background:#2b2410;border-color:#5c4a1f}
-  .b-ghost{color:rgba(255,255,255,.55);background:#262626;border-color:#3a3a3a}
+  .b-ghost{color:rgba(255,255,255,.55);background:#272727;border-color:#3a3a3a}
   .b-err{color:#ff9a9a;background:#2b1414;border-color:#5c2222}
  }
 </style></head><body>
