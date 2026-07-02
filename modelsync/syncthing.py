@@ -75,8 +75,12 @@ class SyncthingClient:
         large transfers restarting forever. Only write on actual change."""
         want = patterns if patterns is not None else IGNORE_PATTERNS
         r = await self._req("GET", "/rest/db/ignores", params={"folder": folder_id})
-        cur = r.json().get("ignore") if isinstance(r.json(), dict) else None
-        if cur == want:
+        body = r.json()
+        cur = body.get("ignore") if isinstance(body, dict) else None
+        # Order-insensitive: our patterns are independent excludes, so a set match
+        # means no change is needed — avoids a rewrite (which restarts the folder,
+        # aborting in-flight transfers) if Syncthing ever echoes a different order.
+        if isinstance(cur, list) and set(cur) == set(want):
             return
         await self._req(
             "POST", "/rest/db/ignores", params={"folder": folder_id}, json={"ignore": want}

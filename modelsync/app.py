@@ -123,6 +123,7 @@ class State:
     pins: dict[str, dict[str, Any]]  # model_id -> {path, label, prev_selector}
     resetting: set[str]  # paths under an in-flight /reset; background loop skips them
     lock: asyncio.Lock
+    net_lock: asyncio.Lock  # guards net_prev across concurrent /net polls (not the big lock)
     loop_task: asyncio.Task[None]
     wake: asyncio.Event  # set by event watchers -> reconcile now, not next tick
     dev_ids: dict[int, str]  # worker id -> Syncthing device id (peer-view fallback)
@@ -243,6 +244,7 @@ async def lifespan(_app: FastAPI):
     state.pins = load_pins()
     state.resetting = set()
     state.lock = asyncio.Lock()
+    state.net_lock = asyncio.Lock()
     state.wake = asyncio.Event()
     state.dev_ids = {}
     state.ev_tasks = {}
@@ -470,7 +472,9 @@ async def _sync_pins(workers: list[Worker], have: dict[str, set[int]]) -> None:
         return
     # Drop pins whose folder no longer exists anywhere (model fully removed): the
     # pin can never label a holder again, so stop tracking + writing for it.
-    dead = [mid for mid, pin in state.pins.items() if pin["path"] not in have]
+    # Safety: an EMPTY have is treated as a suspicious false-empty GPUStack
+    # response (same as _prune_plan) — never nuke every pin on one bad read.
+    dead = [] if not have else [mid for mid, pin in state.pins.items() if pin["path"] not in have]
     if dead:
         for mid in dead:
             del state.pins[mid]
@@ -869,8 +873,10 @@ async def net() -> dict[int, dict[str, Any]]:
     Syncthing's connection byte totals between polls (not a client-side guess)."""
     workers = await state.gpustack.workers()
     managed = [w for w in workers if w.id in state.members and w.syncable]
-    out: dict[int, dict[str, Any]] = {}
     now = asyncio.get_running_loop().time()
+    # Gather counters first (HTTP, no shared state), then update net_prev under a
+    # dedicated lock so concurrent polls can't clobber each other's samples.
+    totals: dict[int, tuple[int, int, int]] = {}  # wid -> (connected, in_tot, out_tot)
     for w in managed:
         try:
             conns = (await client_for(w).connections()).get("connections") or {}
@@ -884,29 +890,36 @@ async def net() -> dict[int, dict[str, Any]]:
                 connected += 1
             in_tot += int(c.get("inBytesTotal") or 0)
             out_tot += int(c.get("outBytesTotal") or 0)
-        prev = state.net_prev.get(w.id)
-        in_bps = out_bps = 0.0
-        if prev and now > prev[0]:
-            dt = now - prev[0]
-            in_bps = max(0.0, (in_tot - prev[1]) / dt)
-            out_bps = max(0.0, (out_tot - prev[2]) / dt)
-        state.net_prev[w.id] = (now, in_tot, out_tot)
-        out[w.id] = {"connected": connected, "in_bps": in_bps, "out_bps": out_bps}
-    # prune counters for workers that no longer exist (bound growth under churn)
+        totals[w.id] = (connected, in_tot, out_tot)
+    out: dict[int, dict[str, Any]] = {}
     live = {w.id for w in workers}
-    for wid in [k for k in state.net_prev if k not in live]:
-        del state.net_prev[wid]
+    async with state.net_lock:
+        for wid, (connected, in_tot, out_tot) in totals.items():
+            prev = state.net_prev.get(wid)
+            in_bps = out_bps = 0.0
+            if prev and now > prev[0]:
+                dt = now - prev[0]
+                in_bps = max(0.0, (in_tot - prev[1]) / dt)
+                out_bps = max(0.0, (out_tot - prev[2]) / dt)
+            state.net_prev[wid] = (now, in_tot, out_tot)
+            out[wid] = {"connected": connected, "in_bps": in_bps, "out_bps": out_bps}
+        for wid in [k for k in state.net_prev if k not in live]:  # bound growth
+            del state.net_prev[wid]
     return out
 
 
 @app.get("/metrics", dependencies=[Depends(require_auth)])
 async def metrics() -> Response:
-    """Prometheus text exposition of the last reconcile snapshot + counters."""
+    """Prometheus text exposition of the last reconcile snapshot + counters.
+    Snapshot both dicts first so a concurrent reconcile writing them can't be
+    iterated mid-mutation (dict-resize-during-iteration)."""
+    metrics_snap = dict(state.metrics)
+    counters_snap = dict(state.counters)
     lines = []
-    for k, v in state.metrics.items():
+    for k, v in metrics_snap.items():
         lines.append(f"# TYPE modelsync_{k} gauge")
         lines.append(f"modelsync_{k} {v}")
-    for k, v in state.counters.items():
+    for k, v in counters_snap.items():
         lines.append(f"# TYPE modelsync_{k}_total counter")
         lines.append(f"modelsync_{k}_total {v}")
     return Response("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
