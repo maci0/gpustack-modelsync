@@ -161,17 +161,7 @@ async def reconcile(
                         and not st["complete"]
                         and st["receive_only_changed"] > 0
                         and st["completion"] < src_compl  # strictly less complete
-                    ):
-                        await c.revert(fid)
-                    # Flag-clear revert: after an index reset, local files hashed
-                    # before the remote index arrives are misattributed as local
-                    # changes, leaving a COMPLETE, byte-identical replica marked
-                    # diverged forever (complete -> never "stuck", so nothing else
-                    # clears it). With local==global, need==0 and a 100% confirmed
-                    # source, revert deletes nothing: identical content is just
-                    # re-marked synced; any truly-diverged file is re-pulled from
-                    # the clean source.
-                    elif (
+                    ) or (
                         st["complete"]
                         and st["receive_only_changed"] > 0
                         and st["need_bytes"] == 0
