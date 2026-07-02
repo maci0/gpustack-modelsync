@@ -32,9 +32,10 @@ GPUStack server ──/v2/workers──▶ orchestrator ──Syncthing REST─�
   GPUStack's own cache mount so those absolute paths are valid in the sidecar.
 - **Live progress**, per node per model, in the UI (Syncthing completion %).
 - **Capacity + state aware.** Won't target a node that's NOT_READY, unreachable
-  or in maintenance, nor one whose free disk (`MountPoint.free`) is smaller than
-  the model (`ModelFile.size`). Skips are reported, never silent. A node that
-  already holds the model is never rejected.
+  or in maintenance, one whose free disk (`MountPoint.free`) is smaller than
+  the model (`ModelFile.size`), or one GPUStack is **still downloading the model
+  to** (two writers into one directory). Skips are reported, never silent. A
+  node that already holds the model is never rejected.
 - **Full automation (the point).** A background loop (`RECONCILE_INTERVAL`) keeps
   three things in agreement with your plan: Syncthing shares, GPUStack
   registration, and orphan cleanup. Tick a node → it syncs, and once complete the
@@ -59,10 +60,11 @@ GPUStack server ──/v2/workers──▶ orchestrator ──Syncthing REST─�
   its index DB → unpause so it rebuilds from the source. Healthy replicas just
   revert (no-op).
 - **GPUStack-matched UI.** Styled with the design tokens from the gpustack-ui
-  source (primary `#007BFF`, success `#54cc98`, antd table/tags). Per-node
-  GPU/VRAM/util headers with live transfer rates, summary bar, filter, bulk
-  row/column selection, capacity preview footer, per-model reset + copy-path,
-  per-copy purge.
+  source (primary `#007BFF`, success `#54cc98`, antd table/tags), including an
+  OS-auto **dark mode** using GPUStack's realDark palette. Per-node
+  GPU/VRAM/util headers with live transfer rates, summary bar, filter (`/` to
+  focus, Esc to clear), bulk row/column selection, capacity preview footer,
+  per-model reset + copy-path, per-copy purge.
 - **Event-driven.** Watches each node's Syncthing events (folder completion /
   errors) and GPUStack's SSE streams (worker + model-file create/delete): a
   finished sync registers within seconds; the interval is only a fallback.
@@ -154,8 +156,28 @@ keep it on the cluster network. (Both handled by `hostNetwork` in `k8s.yaml`.)
 | `REGISTER_IN_GPUSTACK` | `true` | after sync, register the model on the new node in GPUStack (clone source spec); deregister on removal |
 | `RECONCILE_INTERVAL` | `15` | fallback seconds between reconcile passes; Syncthing/GPUStack **events wake the loop immediately**, so completed syncs register within seconds |
 | `SYNC_MAX_SEND_KBPS` / `SYNC_MAX_RECV_KBPS` | `0` (off) | cap Syncthing transfer rates on every node so a model sync can't saturate the LAN during inference |
-| `STATE_DIR` | `.` | dir for plan/registry/members (mount a volume here) |
+| `STATE_DIR` | `.` | dir for plan/registry/members/pins state files (mount a volume here) |
 | `LISTEN_PORT` | `8585` | orchestrator UI |
+
+## API
+
+All routes need the token (`X-Auth-Token` or `Bearer`) unless the peer is in
+`AUTH_EXEMPT_CIDRS`. Everything the UI does goes through these:
+
+| endpoint | what |
+|---|---|
+| `GET /nodes` | workers incl. GPU/VRAM/disk/labels |
+| `GET /clusters` | cluster id → display name |
+| `GET /models` | model folders: plan/have/pending/serving per node |
+| `POST /plan {plan:{path:[ids]}}` | apply the full desired matrix (validated; skips report as warnings) |
+| `GET /status` | per (model, node): completion, state, bytes, integrity `clean` flag |
+| `GET /net` | per node: connected peers + real in/out transfer rates |
+| `GET /metrics` | Prometheus exposition (rows, clean, errors, counters) |
+| `POST /reset {path}` | operator recovery: override clean source + index-reset stuck replicas |
+| `POST /purge {path, worker_id, delete_files}` | remove one node's copy (record + optionally bytes) |
+| `POST /pin {path, model_id}` / `POST /unpin {model_id}` | scheduler pinning via worker labels + `worker_selector` |
+| `GET /suggest` | copies serving on nodes not yet in the plan |
+| `GET /events?token=` | SSE nudge stream for UI auto-refresh |
 
 ## Compatibility
 
@@ -197,10 +219,15 @@ The orchestrator mutates GPUStack and reconfigures Syncthing on every node, so:
   Syncthing key is ever sent to them (SSRF / key-exfil guard).
 - **UI is XSS-hardened**: all GPUStack-derived strings are escaped, no inline
   event handlers, and a CSP blocks injected/foreign scripts.
-- Prefer **`https://` for `GPUSTACK_URL`** so the token isn't sent in cleartext.
-- Keep the Syncthing GUI on the private cluster network; the shared key is its
-  only guard. Per-node keys + running Syncthing as the cache UID (not root) are
-  the next hardening steps.
+- Prefer **`https://` for `GPUSTACK_URL`** so the token isn't sent in cleartext
+  (a startup warning fires otherwise), and set `SSL_CERTFILE`/`SSL_KEYFILE` to
+  serve the orchestrator itself over TLS.
+- Keep the Syncthing GUI on the private cluster network. Use **per-node keys**
+  (`SYNCTHING_API_KEYS=ip=key,...`) instead of one shared key so a compromised
+  node can't reach every peer (a warning fires when the shared key is in use).
+  Running Syncthing as the cache UID (not root) is the remaining hardening step.
+- Destructive endpoints are path-gated: purge/pin/sync targets must sit under
+  `CACHE_ROOTS`, so a compromised GPUStack record can't point them at `/etc`.
 
 ## Limitations / next steps
 
@@ -210,10 +237,10 @@ The orchestrator mutates GPUStack and reconfigures Syncthing on every node, so:
   layer (a small HTTP byte-range fetch from a peer that already has the file,
   serving local once Syncthing finishes). Deliberately not built — add only if
   cold-start latency proves to matter.
-- **One shared Syncthing API key.** Simple for a prototype. Per-node keys + a
-  secret store if you harden it.
 - **Plan stored in `plan.json`** next to the orchestrator. Fine for one
   instance; move to GPUStack's DB if you want it co-located.
+- **One orchestrator instance.** State files + the reconcile lock assume a
+  single replica (k8s Deployment `replicas: 1`); no leader election.
 
 ## Verification
 

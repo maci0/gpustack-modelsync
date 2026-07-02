@@ -98,6 +98,8 @@ PAGE = """<!doctype html>
     --line:#3a3a3a;--acc:#007BFF;--acc-d:#3d9bff;--tint:#111d2e;--ok:#48A77E;--warn:#d89614;--bad:#dc4446}
   body{background:#141414}
   select,button,#q,.reset,.cpy,.purge{border-color:#3a3a3a}
+  .reset,.cpy,.purge{background:#272727;color:var(--mut)}
+  .wrap{border-color:#3a3a3a;box-shadow:none}
   select,#q{background:#1f1f1f;color:var(--fg)}
   thead th{background:#1f1f1f;border-bottom-color:#3a3a3a}
   tfoot td,tfoot td:first-child{background:#181818}

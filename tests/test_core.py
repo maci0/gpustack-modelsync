@@ -26,7 +26,7 @@ class FakeGP:
     async def get_model_file(self, mid):
         return self.mf.get(mid)
 
-    async def delete_model_file(self, mid):
+    async def delete_model_file(self, mid, cleanup=False):
         self.deleted.append(mid)
 
 
