@@ -39,3 +39,4 @@ reportUnknownVariableType = false
 reportUnknownArgumentType = false
 reportUnknownParameterType = false
 reportMissingParameterType = false
+

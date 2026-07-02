@@ -391,10 +391,10 @@ def _max_free(status) -> int | None:
     fs = status.get("filesystem")
     if not isinstance(fs, list):
         return None
-    frees = [
-        _int_or_none(m.get("free") if m.get("free") is not None else m.get("available"))
-        for m in fs
-        if isinstance(m, dict)
-    ]
-    frees = [f for f in frees if f is not None]
+    frees: list[int] = []
+    for m in fs:
+        if isinstance(m, dict):
+            f = _int_or_none(m.get("free") if m.get("free") is not None else m.get("available"))
+            if f is not None:
+                frees.append(f)
     return max(frees) if frees else None

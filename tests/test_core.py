@@ -28,10 +28,10 @@ class FakeGP:
         self.deleted.append(mid)
 
 
-def _status(complete=True, need=0, local=100, glob=100, state="idle"):
+def _status(complete=True, need=0, local=100, glob=100, state="idle", roc=0):
     return {"completion": 100.0 if not need else 50.0, "complete": complete,
             "state": state, "need_bytes": need, "global_bytes": glob,
-            "local_bytes": local, "receive_only_changed": 0, "errors": 0}
+            "local_bytes": local, "receive_only_changed": roc, "errors": 0}
 
 
 class FakeSt:
@@ -130,6 +130,34 @@ async def test_resolves_stuck_folder_from_clean_copy(monkeypatch):
     await A._reconcile_core({"/m": {1, 2}}, [W(1), W(2)], [F("/m", nodes=[1, 2])])
     assert sts[1].overrode      # clean copy forced authoritative
     assert sts[2].reverted      # stuck replica reverted toward it
+
+
+async def _run_reconcile(sts, have):
+    from modelsync.reconcile import reconcile
+    await reconcile({"/m": {1, 2}}, [W(1), W(2)], lambda w: sts[w.id], 22000, {"/m": have})
+
+
+# revert guard (data-loss-critical): a diverged, incomplete, less-complete replica
+# IS reverted; a complete one, or one merely still downloading (no divergence), is NOT.
+async def test_revert_guard_reverts_only_diverged_incomplete():
+    src = FakeSt(status=_status(complete=True, local=100, glob=100))            # holder, 100%
+    rep = FakeSt(status=_status(complete=False, need=50, local=50, glob=100, roc=10))  # diverged, 50%
+    await _run_reconcile({1: src, 2: rep}, {1})
+    assert rep.reverted
+
+
+async def test_revert_guard_spares_complete_replica():
+    src = FakeSt(status=_status(complete=True, local=100, glob=100))
+    rep = FakeSt(status=_status(complete=True, local=100, glob=100))            # complete copy
+    await _run_reconcile({1: src, 2: rep}, {1})
+    assert not rep.reverted                                                     # never wipe a full copy
+
+
+async def test_revert_guard_spares_downloading_replica():
+    src = FakeSt(status=_status(complete=True, local=100, glob=100))
+    rep = FakeSt(status=_status(complete=False, need=50, local=50, glob=100, roc=0))  # just pulling, no divergence
+    await _run_reconcile({1: src, 2: rep}, {1})
+    assert not rep.reverted                                                     # roc==0 -> not a conflict
 
 
 async def test_stuck_folder_not_touched_while_resetting(monkeypatch):
