@@ -123,8 +123,9 @@ const jpost=(u,body)=>api(u,{method:'POST',headers:{'content-type':'application/
 // (end of in-page app; the Tampermonkey build lives in USERSCRIPT below)
 
 async function loadNodes(){
-  try{ nodes=await jget('/nodes'); clusters=await jget('/clusters'); }
+  try{ nodes=await jget('/nodes'); }
   catch(e){ return; }  // transient: keep last view
+  try{ clusters=await jget('/clusters'); }catch(e){}  // cosmetic only: names fall back
   const cs=[...new Set(nodes.map(n=>n.cluster_id))];
   const cname=Object.fromEntries(clusters.map(c=>[String(c.id),c.name]));
   const sel=$('cluster'),cur=sel.value;
@@ -280,7 +281,8 @@ function tickAge(){
 function updateStats(){
   const ns=vNodes(), ready=ns.filter(n=>n.state==='ready').length;
   const vals=Object.values(statusMap);
-  const syncing=vals.filter(s=>!s.complete&&!s.errors).length, errs=vals.filter(s=>s.errors>0).length;
+  const syncing=vals.filter(s=>!s.complete&&!s.errors&&s.state!=='unreachable').length;
+  const errs=vals.filter(s=>s.errors>0||s.state==='unreachable').length;  // unreachable = problem, not progress
   $('stats').innerHTML=`<span>models <b>${models.length}</b></span><span>nodes <b>${ready}/${ns.length}</b> ready</span>`+
     `<span class="syn">syncing <b>${syncing}</b></span><span class="err">errors <b>${errs}</b></span>`;
 }
@@ -292,6 +294,7 @@ function paint(){
     if(serving){under.innerHTML='<span class="badge b-serving" title="model instance running here">▶ serving</span>';return;}
     if(s){
       if(s.errors>0){under.innerHTML='<span class="badge b-err" title="Syncthing error — ⟳ reset">error</span>';return;}
+      if(s.state==='unreachable'){under.innerHTML='<span class="badge b-err" title="Syncthing on this node not responding">unreachable</span>';return;}
       if(!s.complete){
         const left=s.need_bytes?` · ${gib(s.need_bytes)} left`:'';
         under.innerHTML=`<div class="bar"><span style="width:${Number(s.completion)||0}%"></span></div><span class="pct">${(Number(s.completion)||0).toFixed(0)}% ${esc(s.state)}${left}${esc(rateTxt(el.dataset.cell,s.need_bytes))}</span>`;
@@ -447,6 +450,7 @@ function paint(){
     if(srv){u.innerHTML='<span class="bdg k-ok">▶ serving</span>';return;}
     if(s){
       if(s.errors>0){u.innerHTML='<span class="bdg k-err">error</span>';return;}
+      if(s.state==='unreachable'){u.innerHTML='<span class="bdg k-err">unreachable</span>';return;}
       if(!s.complete){const left=s.need_bytes?' · '+gib(s.need_bytes)+' left':'';
         u.innerHTML=`<span class="bar"><i style="width:${Number(s.completion)||0}%"></i></span> <span style="font-size:10px;color:#999">${(Number(s.completion)||0).toFixed(0)}% ${esc(s.state)}${left}</span>`;return;}
       u.innerHTML=have?'<span class="bdg k-ok">ready</span>':'<span class="bdg k-pend">registering…</span>';return;
