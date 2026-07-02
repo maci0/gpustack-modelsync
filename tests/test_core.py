@@ -94,6 +94,7 @@ def _setup(monkeypatch, complete=True, mf=None):
     gp = FakeGP(mf)
     A.state.gpustack = gp
     monkeypatch.setattr(A, "client_for", lambda w: FakeSt(complete))
+    monkeypatch.setattr(A, "_ensure_event_watchers", lambda *a: None)  # no real watcher tasks in tests
     monkeypatch.setattr(A.settings, "register_in_gpustack", True)
     return gp
 

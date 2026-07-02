@@ -357,7 +357,7 @@ $('body').addEventListener('change',e=>{
   }else if(e.target.matches('input[data-n]')){
     recordRow(rowOf(e.target));
   }else return;
-  syncBulk();
+  syncBulk();paint();  // paint too: purge-button visibility depends on tick state
 });
 $('head').addEventListener('change',e=>{
   if(!e.target.matches('.colall'))return;  // whole column: this node for ALL models

@@ -10,6 +10,7 @@ from modelsync.gpustack import ModelFolder, ModelInstance, Worker
 
 class FakeGP:
     def __init__(self):
+        self.deleted: list[tuple[int, bool]] = []
         self.ws = [Worker(id=1, name="a", ip="10.0.0.1", state="ready", cluster_id=1),
                    Worker(id=2, name="b", ip="10.0.0.2", state="ready", cluster_id=1)]
         self.folders = [ModelFolder(path="/var/lib/gpustack/m", label="m", size=100,
@@ -32,8 +33,14 @@ class FakeGP:
     async def get_model_file(self, mid):
         return None
 
-    async def delete_model_file(self, mid):
-        pass
+    async def delete_model_file(self, mid, cleanup=False):
+        self.deleted.append((mid, cleanup))
+
+    async def find_model_file(self, path, wid):
+        return 42 if (path, wid) == ("/var/lib/gpustack/m", 2) else None
+
+    async def clusters(self):
+        return [{"id": 1, "name": "test"}]
 
 
 class FakeSt:
@@ -61,6 +68,7 @@ def client(monkeypatch):
         A.state.gpustack = FakeGP()
         A.state.plan, A.state.registry, A.state.members, A.state.resetting = {}, {}, set(), set()
         monkeypatch.setattr(A, "client_for", lambda w: FakeSt())
+        monkeypatch.setattr(A, "_ensure_event_watchers", lambda *a: None)
         yield c
 
 
@@ -110,3 +118,16 @@ def test_purge_refuses_running_instance(client):
     r = client.post("/purge", json={"path": "/var/lib/gpustack/m", "worker_id": 1,
                                     "delete_files": True}).json()
     assert r["ok"] is False and "instance is running" in r["error"]  # fixture serves there
+
+
+def test_purge_deletes_record_with_cleanup(client):
+    # node 2: no instance running; fake maps (path, 2) -> model-file 42
+    r = client.post("/purge", json={"path": "/var/lib/gpustack/m", "worker_id": 2,
+                                    "delete_files": True}).json()
+    assert r["ok"] is True
+    assert (42, True) in A.state.gpustack.deleted        # cleanup delete issued
+    assert any("deleted record + files" in a for a in r["actions"])
+
+
+def test_clusters_endpoint(client):
+    assert client.get("/clusters").json() == [{"id": 1, "name": "test"}]

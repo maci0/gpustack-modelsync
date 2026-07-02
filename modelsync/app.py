@@ -475,17 +475,21 @@ async def _background_loop() -> None:
 
 async def _gpustack_watch_loop(resource: str) -> None:
     """Wake the reconcile loop on GPUStack create/delete events. Update events
-    (status heartbeats) are ignored — they'd wake every few seconds for nothing."""
+    (status heartbeats) are ignored — they'd wake every few seconds for nothing.
+    Backoff doubles up to 5 min so an unsupported/broken stream doesn't spam."""
+    backoff = 5
     while True:
         try:
             async for line in state.gpustack.watch(resource):
+                backoff = 5  # stream is alive; reset
                 up = line.upper()
                 if b"CREATE" in up or b"DELETE" in up:
                     state.wake.set()
         except asyncio.CancelledError:
             raise
         except Exception:
-            await asyncio.sleep(10)  # stream died; reconnect
+            await asyncio.sleep(backoff)  # stream died / unsupported; reconnect
+            backoff = min(300, backoff * 2)
 
 
 async def _syncthing_event_loop(w: Worker) -> None:
@@ -917,17 +921,28 @@ async def purge(body: PurgeIn) -> dict[str, Any]:
                 del state.plan[body.path]
             save_plan(state.plan)
             actions.append("removed from plan")
-        # unshare + deregister our registration (if any) happens here
-        await _reconcile_core(state.plan)
+        # Find + delete the model-file BEFORE reconciling: reconcile would
+        # deregister a copy WE created (record gone, bytes kept), and then a
+        # cleanup delete would have nothing to act on — files left forever.
         mid = await state.gpustack.find_model_file(body.path, body.worker_id)
         if mid is None:
             actions.append("no GPUStack model-file record on that node")
         else:
+            # Re-check instances right before the destructive step: GPUStack's
+            # scheduler is external and could have placed one since the first check.
+            for mi in await state.gpustack.model_instances():
+                if mi.local_dir == body.path and mi.worker_id == body.worker_id:
+                    return {"ok": False, "error": "a model instance was just scheduled from this copy",
+                            "actions": actions}
             try:
                 await state.gpustack.delete_model_file(mid, cleanup=body.delete_files)
                 actions.append("deleted record + files" if body.delete_files else "deleted record (files kept)")
             except httpx.HTTPError as e:
                 return {"ok": False, "error": f"delete failed: {e}", "actions": actions}
+            k = _key(body.path, body.worker_id)
+            if state.registry.pop(k, None) is not None:  # it was ours; already deleted above
+                save_registry(state.registry)
+        await _reconcile_core(state.plan)  # unshare the Syncthing folder (GC)
     return {"ok": True, "actions": actions}
 
 
