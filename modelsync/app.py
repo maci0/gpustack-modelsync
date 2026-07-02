@@ -656,6 +656,7 @@ async def models() -> list[dict[str, Any]]:
             "size": f.size,
             "nodes": sorted(plan.get(f.path, set())),  # checkbox = plan
             "have": f.current_nodes,
+            "pending": f.pending_nodes,  # GPUStack still downloading here
             "serving": sorted(serving.get(f.path, set())),
         }
         for f in folders

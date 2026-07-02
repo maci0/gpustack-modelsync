@@ -89,6 +89,28 @@ PAGE = """<!doctype html>
  .b-ghost{color:rgba(0,0,0,.65);background:#fafafa;border-color:#d9d9d9}
  .b-err{color:#cf1322;background:#fff2f0;border-color:#ffa39e}
  .empty{color:var(--mut);padding:34px;text-align:center}
+ .b-dl{color:#0068d6;background:#e6f4ff;border-color:#91caff}  /* GPUStack downloading */
+ /* Dark mode: gpustack-ui dark tokens (dark.ts + global.less) — auto by OS pref. */
+ @media (prefers-color-scheme: dark){
+  :root{--bg:#141414;--card:#1f1f1f;--fg:rgba(255,255,255,.85);--mut:rgba(255,255,255,.45);
+    --line:#303030;--acc:#007BFF;--acc-d:#3d9bff;--tint:#111d2e;--ok:#48A77E;--warn:#d89614;--bad:#dc4446}
+  body{background:#141414}
+  select,button,#q,.reset,.cpy,.purge{border-color:#3a3a3a}
+  select,#q{background:#1f1f1f;color:var(--fg)}
+  thead th{background:#1f1f1f;border-bottom-color:#303030}
+  tfoot td,tfoot td:first-child{background:#181818}
+  th:first-child,td:first-child{background:var(--card)}
+  tbody tr:hover,tbody tr:hover td:first-child{background:#262626}
+  tr.dirtyrow td,tr.dirtyrow td:first-child{background:#2b2716}
+  tr.dirtyrow:hover td,tr.dirtyrow:hover td:first-child{background:#332f18}
+  .bar,.hbar,.msT .bar{background:#333}
+  .mname{color:#dad8d2}
+  .b-present{color:#7ee2b8;background:#0f2a1e;border-color:#1f5c40}
+  .b-serving,.b-dl{color:#8cc8ff;background:#0f2036;border-color:#1f4a80}
+  .b-pending{color:#e8b339;background:#2b2410;border-color:#5c4a1f}
+  .b-ghost{color:rgba(255,255,255,.55);background:#262626;border-color:#3a3a3a}
+  .b-err{color:#ff9a9a;background:#2b1414;border-color:#5c2222}
+ }
 </style></head><body>
 <header>
  <span class="logo"></span><h1>Model Sync</h1>
@@ -200,7 +222,7 @@ function render(){
     const sel=selOf(m);
     const cells=ns.map(n=>{
       const cb=`<input type="checkbox" data-m="${esc(m.path)}" data-n="${esc(n.id)}" ${sel.includes(n.id)?'checked':''}>`;
-      return `<td><div class="cell" data-cell="${esc(m.path+'@'+n.id)}" data-have="${m.have.includes(n.id)}" data-serving="${(m.serving||[]).includes(n.id)}">${cb}<div class="under"></div></div></td>`;
+      return `<td><div class="cell" data-cell="${esc(m.path+'@'+n.id)}" data-have="${m.have.includes(n.id)}" data-pending="${(m.pending||[]).includes(n.id)}" data-serving="${(m.serving||[]).includes(n.id)}">${cb}<div class="under"></div></div></td>`;
     }).join('');
     const sp=splitPath(m.path);
     const rowAll=ns.length>0&&ns.every(n=>sel.includes(n.id));
@@ -326,6 +348,7 @@ function paint(){
     const under=el.querySelector('.under'), s=statusMap[el.dataset.cell];
     const serving=el.dataset.serving==='true', have=el.dataset.have==='true';
     if(serving){under.innerHTML='<span class="badge b-serving" title="model instance running here">▶ serving</span>';return;}
+    if(el.dataset.pending==='true'&&!s){under.innerHTML='<span class="badge b-dl" title="GPUStack is downloading this model here (not a sync source until done)">↓ downloading</span>';return;}
     if(s){
       if(s.errors>0){under.innerHTML='<span class="badge b-err" title="Syncthing error — ⟳ reset">error</span>';return;}
       if(s.state==='unreachable'){under.innerHTML='<span class="badge b-err" title="Syncthing on this node not responding">unreachable</span>';return;}
@@ -399,8 +422,10 @@ function copyText(t){  // clipboard API needs https; textarea fallback works on 
   const ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.opacity='0';
   document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();
 }
-document.addEventListener('keydown',e=>{  // '/' focuses the filter (like GitHub)
-  if(e.key==='/'&&!/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)){e.preventDefault();$('q').focus();}
+document.addEventListener('keydown',e=>{  // '/' focuses filter (GitHub-style), Esc clears it
+  const typing=/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName);
+  if(e.key==='/'&&!typing){e.preventDefault();$('q').focus();}
+  else if(e.key==='Escape'&&document.activeElement===$('q')){$('q').value='';render();$('q').blur();}
 });
 
 (async()=>{await loadNodes();await loadModels();poll();})();
@@ -502,7 +527,7 @@ function render(){
   h+=models.map(m=>{
     const cells=ns.map(n=>{
       const on=m.nodes.includes(n.id);
-      return `<td><div class="cell" data-cell="${esc(m.path+'@'+n.id)}" data-have="${m.have.includes(n.id)}" data-srv="${(m.serving||[]).includes(n.id)}">`+
+      return `<td><div class="cell" data-cell="${esc(m.path+'@'+n.id)}" data-have="${m.have.includes(n.id)}" data-pending="${(m.pending||[]).includes(n.id)}" data-srv="${(m.serving||[]).includes(n.id)}">`+
         `<input type="checkbox" data-m="${esc(m.path)}" data-n="${esc(n.id)}" ${on?'checked':''}><div class="u"></div></div></td>`;
     }).join('');
     return `<tr><td><button class="rs" data-path="${esc(m.path)}" title="recover stuck folder">↻</button>`+
@@ -517,6 +542,7 @@ function paint(){
   body.querySelectorAll('[data-cell]').forEach(el=>{
     const u=el.querySelector('.u'),s=stat[el.dataset.cell],have=el.dataset.have==='true',srv=el.dataset.srv==='true';
     if(srv){u.innerHTML='<span class="bdg k-ok">▶ serving</span>';return;}
+    if(el.dataset.pending==='true'&&!s){u.innerHTML='<span class="bdg k-pend">↓ downloading</span>';return;}
     if(s){
       if(s.errors>0){u.innerHTML='<span class="bdg k-err">error</span>';return;}
       if(s.state==='unreachable'){u.innerHTML='<span class="bdg k-err">unreachable</span>';return;}
