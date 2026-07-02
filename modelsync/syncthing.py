@@ -27,8 +27,12 @@ LOCAL_ONLY_OPTIONS: dict[str, Any] = {
 }
 
 # Never replicate partial artifacts: GPUStack's own downloader writes temp files
-# while pulling a model; syncing those would ship garbage to replicas.
+# while pulling a model; syncing those would ship garbage to replicas. `.cache`
+# is huggingface_hub's per-node download bookkeeping (.metadata stamps) — GPUStack
+# rewrites it whenever it verifies a copy, so syncing it would flag byte-identical
+# replicas as permanently diverged.
 IGNORE_PATTERNS = [
+    "(?d).cache",
     "*.tmp", "*.part", "*.partial", "*.download", "*.crdownload",
     "~*", ".locks", "*.lock", ".DS_Store",
 ]
