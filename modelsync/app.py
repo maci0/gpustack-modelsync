@@ -394,7 +394,8 @@ async def index() -> HTMLResponse:
         PAGE,
         headers={
             "Content-Security-Policy": (
-                "default-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'"
+                "default-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; "
+                "frame-ancestors 'none'"
             ),
             "X-Frame-Options": "DENY",
         },
@@ -424,6 +425,11 @@ async def userscript(request: Request) -> Response:
 @app.get("/nodes", dependencies=[Depends(require_auth)])
 async def nodes() -> list[Worker]:
     return await state.gpustack.workers()
+
+
+@app.get("/clusters", dependencies=[Depends(require_auth)])
+async def clusters() -> list[dict[str, Any]]:
+    return await state.gpustack.clusters()
 
 
 @app.get("/models", dependencies=[Depends(require_auth)])

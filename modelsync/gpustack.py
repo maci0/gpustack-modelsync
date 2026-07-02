@@ -206,6 +206,22 @@ class GPUStackClient:
             for p, w in sorted(nodes.items())
         ]
 
+    async def clusters(self) -> list[dict[str, Any]]:
+        """id -> display name for the cluster selector. Best-effort: purely
+        cosmetic (UI falls back to 'cluster <id>'), so any error yields []."""
+        try:
+            items = await self._list(f"{self._v}/clusters")
+        except httpx.HTTPError:
+            return []
+        out = []
+        for c in items:
+            cid = c.get("id") if isinstance(c, dict) else None
+            if cid is None:
+                continue
+            name = c.get("name")
+            out.append({"id": cid, "name": name if isinstance(name, str) and name else f"cluster {cid}"})
+        return out
+
     async def model_instances(self) -> list[ModelInstance]:
         # Best-effort: instances only drive the decorative "serving" badge and
         # /suggest, never a destructive action, so a transient error just yields
