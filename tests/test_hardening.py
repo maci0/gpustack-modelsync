@@ -48,16 +48,23 @@ def test_check_token(monkeypatch):
         _check_token("café")  # non-ascii must 401, not TypeError/500
 
 
+def _req(host="192.168.0.50"):
+    """Fake request with a non-exempt LAN peer (auth must be enforced)."""
+    return type("R", (), {"client": type("C", (), {"host": host})()})()
+
+
 async def test_require_auth_header_vs_query(monkeypatch):
     monkeypatch.setattr(settings, "auth_token", "tok")
-    await require_auth(authorization="Bearer tok", x_auth_token=None)   # bearer
-    await require_auth(authorization=None, x_auth_token="tok")          # header
+    await require_auth(_req(), authorization="Bearer tok", x_auth_token=None)   # bearer
+    await require_auth(_req(), authorization=None, x_auth_token="tok")          # header
     with pytest.raises(fastapi.HTTPException):
-        await require_auth(authorization="Bearer bad", x_auth_token=None)
+        await require_auth(_req(), authorization="Bearer bad", x_auth_token=None)
     # query token: accepted ONLY by the /events dependency, never by require_auth
-    await require_auth_query(authorization=None, x_auth_token=None, token="tok")
+    await require_auth_query(_req(), authorization=None, x_auth_token=None, token="tok")
     with pytest.raises(fastapi.HTTPException):
-        await require_auth_query(authorization=None, x_auth_token=None, token="bad")
+        await require_auth_query(_req(), authorization=None, x_auth_token=None, token="bad")
+    # exempt peer (loopback in default config): no token needed at all
+    await require_auth(_req("127.0.0.1"), authorization=None, x_auth_token=None)
 
 
 def test_load_json_corrupt_backs_up_and_defaults(tmp_path):
@@ -98,6 +105,27 @@ def test_state_loaders_robust_to_corruption(tmp_path, monkeypatch):
     monkeypatch.setattr(A, "REGISTRY_FILE", rf)
     rf.write_text(json.dumps([1, 2, 3]))                # non-dict JSON
     assert A.load_registry() == {}
+
+
+def test_peer_exempt_matches_socket_ip_only():
+    class Req:
+        def __init__(self, host):
+            self.client = type("C", (), {"host": host})() if host is not None else None
+
+    import ipaddress
+    nets = [ipaddress.ip_network("127.0.0.0/8"), ipaddress.ip_network("::1/128"),
+            ipaddress.ip_network("172.17.0.1/32")]
+    orig = A._EXEMPT_NETS[:]
+    A._EXEMPT_NETS[:] = nets
+    try:
+        assert A._peer_exempt(Req("127.0.0.1"))          # loopback exempt
+        assert A._peer_exempt(Req("::1"))                # v6 loopback exempt
+        assert A._peer_exempt(Req("172.17.0.1"))         # docker gateway (configured)
+        assert not A._peer_exempt(Req("192.168.0.50"))   # LAN client -> token required
+        assert not A._peer_exempt(Req("testclient"))     # non-IP peer -> never exempt
+        assert not A._peer_exempt(Req(None))             # no client info -> never exempt
+    finally:
+        A._EXEMPT_NETS[:] = orig
 
 
 def test_prune_plan_and_false_empty_safety():

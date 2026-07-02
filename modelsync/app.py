@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
@@ -121,6 +122,25 @@ def client_for(w: Worker) -> SyncthingClient:
     )
 
 
+_EXEMPT_NETS = [
+    ipaddress.ip_network(c.strip())
+    for c in settings.auth_exempt_cidrs.split(",")
+    if c.strip()
+]
+
+
+def _peer_exempt(request: Request) -> bool:
+    """True if the TCP peer's IP is in an auth-exempt CIDR. Uses the socket peer
+    ONLY (request.client) — never X-Forwarded-For or any header a client could
+    forge. A non-IP peer (test harness, unix socket) is never exempt."""
+    host = request.client.host if request.client else ""
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return any(addr in n for n in _EXEMPT_NETS)
+
+
 def _check_token(tok: str) -> None:
     if not settings.auth_token:
         return  # open API (only allowed on loopback; enforced in main())
@@ -130,21 +150,27 @@ def _check_token(tok: str) -> None:
 
 
 async def require_auth(
+    request: Request,
     authorization: str | None = Header(None),
     x_auth_token: str | None = Header(None),
 ) -> None:
     """Header-only auth for normal routes (never a query param, which would leak
-    the token into access/proxy logs)."""
+    the token into access/proxy logs). Trusted-local peers skip the token."""
+    if _peer_exempt(request):
+        return
     _check_token((authorization or "").removeprefix("Bearer ").strip() or (x_auth_token or ""))
 
 
 async def require_auth_query(
+    request: Request,
     authorization: str | None = Header(None),
     x_auth_token: str | None = Header(None),
     token: str | None = Query(None),
 ) -> None:
     """Only for /events: EventSource can't set headers, so a query token is
     accepted here (and ONLY here)."""
+    if _peer_exempt(request):
+        return
     _check_token(
         (authorization or "").removeprefix("Bearer ").strip()
         or (x_auth_token or "")

@@ -123,6 +123,7 @@ keep it on the cluster network. (Both handled by `hostNetwork` in `k8s.yaml`.)
 | `GPUSTACK_TOKEN` | — | GPUStack Bearer API key |
 | `GPUSTACK_API_PREFIX` | `/v2` | `/v2` for GPUStack 2.x, `/v1` for older |
 | `AUTH_TOKEN` | — | token required on **all** API routes (`X-Auth-Token`/`Bearer`; `/events` via `?token=`). **Set this**; empty refuses to start unless `LISTEN_HOST` is loopback |
+| `AUTH_EXEMPT_CIDRS` | `127.0.0.0/8,::1/128` | requests whose **socket peer** IP is in these CIDRs skip the token (trusted local). Never matched on forwarded headers. Under Docker, host-local traffic arrives from the bridge gateway — add e.g. `172.17.0.1/32` and/or the host's own IP `/32` for tokenless same-machine access. Don't add your whole LAN unless every device may control the cluster |
 | `LISTEN_HOST` | `0.0.0.0` | bind interface; must be loopback if `AUTH_TOKEN` is empty |
 | `ALLOWED_WORKER_CIDRS` | private ranges (no loopback) | only contact workers whose IP is in these CIDRs (SSRF guard) |
 | `CACHE_ROOTS` | `/var/lib/gpustack` | only sync model dirs under these roots (rejects arbitrary paths from a compromised GPUStack) |

@@ -42,6 +42,15 @@ class Settings(BaseSettings):
     # it mutates GPUStack + every node's Syncthing.
     auth_token: str = ""
 
+    # Requests whose SOCKET peer IP is in these CIDRs skip the token (trusted
+    # local access). Matched on the TCP peer only — never a forwarded header, so
+    # it can't be spoofed through a proxy. Default: loopback. NOTE: under Docker
+    # with a published port, host-local connections arrive from the bridge
+    # gateway (e.g. 172.17.0.1), so add that (and/or the host's own IP /32) to
+    # make "same machine" tokenless. Do NOT put your whole LAN here unless every
+    # device on it may control the cluster.
+    auth_exempt_cidrs: str = "127.0.0.0/8,::1/128"
+
     # Only talk to workers whose IP is in these CIDRs (SSRF guard: a worker's IP
     # comes from GPUStack and we send the shared Syncthing key to it). Defaults =
     # the private ranges, v4 and v6 (fc00::/7 = unique-local). Loopback is NOT
