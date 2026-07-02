@@ -19,6 +19,10 @@ dev = ["pytest>=8", "pytest-asyncio>=0.23", "hypothesis>=6", "pyright>=1.1", "ru
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+filterwarnings = [
+    # starlette TestClient/httpx pairing deprecation; upstream, not actionable here
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated.*",
+]
 
 [build-system]
 requires = ["hatchling"]

@@ -136,10 +136,18 @@ class State:
 state = State()
 
 
+# Optional per-node Syncthing API keys ("ip=key,..."); fall back to the shared key.
+_ST_KEYS: dict[str, str] = dict(
+    kv.split("=", 1) for kv in
+    (p.strip() for p in settings.syncthing_api_keys.split(","))
+    if kv and "=" in kv
+)
+
+
 def client_for(w: Worker) -> SyncthingClient:
     return SyncthingClient(
         f"http://{w.ip}:{settings.syncthing_gui_port}",
-        settings.syncthing_api_key,
+        _ST_KEYS.get(w.ip, settings.syncthing_api_key),
         state.http,
         tuple(r.strip() for r in settings.cache_roots.split(",") if r.strip()),
     )
@@ -970,7 +978,15 @@ def main() -> None:
             "Refusing to start: MODELSYNC_AUTH_TOKEN is unset and LISTEN_HOST "
             f"({settings.listen_host}) is not loopback. Set a token or bind 127.0.0.1."
         )
-    uvicorn.run(app, host=settings.listen_host, port=settings.listen_port)
+    if bool(settings.ssl_certfile) != bool(settings.ssl_keyfile):
+        raise SystemExit("Set BOTH MODELSYNC_SSL_CERTFILE and MODELSYNC_SSL_KEYFILE (or neither).")
+    if settings.ssl_certfile:
+        uvicorn.run(
+            app, host=settings.listen_host, port=settings.listen_port,
+            ssl_certfile=settings.ssl_certfile, ssl_keyfile=settings.ssl_keyfile,
+        )
+    else:
+        uvicorn.run(app, host=settings.listen_host, port=settings.listen_port)
 
 
 if __name__ == "__main__":

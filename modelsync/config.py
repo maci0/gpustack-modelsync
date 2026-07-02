@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     # and the standard ports. The orchestrator reaches each worker's GUI at
     # http://<worker-ip>:<gui_port>.
     syncthing_api_key: str = ""
+    # Optional per-node keys: "ip=key,ip=key". A node listed here uses its own
+    # key; others fall back to the shared syncthing_api_key. Rotating away from
+    # one shared key means a compromised node no longer exposes every peer.
+    syncthing_api_keys: str = ""
     syncthing_gui_port: int = 8384
     syncthing_data_port: int = 22000
 
@@ -70,6 +74,11 @@ class Settings(BaseSettings):
 
     listen_host: str = "0.0.0.0"
     listen_port: int = 8585
+
+    # Serve the orchestrator over TLS (both must be set). Needed when GPUStack
+    # itself is https — browsers block mixed-content calls from the userscript.
+    ssl_certfile: str = ""
+    ssl_keyfile: str = ""
 
 
 settings = Settings()

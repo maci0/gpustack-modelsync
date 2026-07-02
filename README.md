@@ -147,6 +147,8 @@ keep it on the cluster network. (Both handled by `hostNetwork` in `k8s.yaml`.)
 | `ALLOWED_WORKER_CIDRS` | private ranges (no loopback) | only contact workers whose IP is in these CIDRs (SSRF guard) |
 | `CACHE_ROOTS` | `/var/lib/gpustack` | only sync model dirs under these roots (rejects arbitrary paths from a compromised GPUStack) |
 | `SYNCTHING_API_KEY` | — | shared key, same on every worker |
+| `SYNCTHING_API_KEYS` | — | optional per-node keys `ip=key,ip=key`; listed nodes use theirs, others the shared key. Rotate away from one shared key so a compromised node can't reach every peer |
+| `SSL_CERTFILE` / `SSL_KEYFILE` | — | serve the orchestrator over TLS (set both). Required for the userscript when GPUStack is https (mixed content) |
 | `SYNCTHING_GUI_PORT` | `8384` | per-worker Syncthing GUI |
 | `SYNCTHING_DATA_PORT` | `22000` | per-worker Syncthing data |
 | `REGISTER_IN_GPUSTACK` | `true` | after sync, register the model on the new node in GPUStack (clone source spec); deregister on removal |

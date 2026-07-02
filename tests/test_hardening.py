@@ -291,3 +291,14 @@ async def test_list_caps_runaway_server():
     gp._get = fake_get
     out = await gp._list("/x", max_pages=5)
     assert len(calls) == 5 and len(out) == 500
+
+
+def test_per_node_syncthing_keys(monkeypatch):
+    monkeypatch.setattr(settings, "syncthing_api_key", "shared")
+    monkeypatch.setitem(A._ST_KEYS, "10.0.0.5", "special")
+    w5 = Worker(id=5, name="a", ip="10.0.0.5", state="ready")
+    w6 = Worker(id=6, name="b", ip="10.0.0.6", state="ready")
+    A.state.http = None  # client construction only
+    assert A.client_for(w5)._headers["X-API-Key"] == "special"   # per-node key
+    assert A.client_for(w6)._headers["X-API-Key"] == "shared"    # fallback
+    A._ST_KEYS.pop("10.0.0.5", None)
