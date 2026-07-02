@@ -27,6 +27,20 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["modelsync"]
 
+[tool.ruff.lint]
+# Default rules + bugbear, async, security, comprehensions, pie, return,
+# simplify, unused-args, ruff-specific. Deliberate exceptions below.
+extend-select = ["B", "ASYNC", "S", "C4", "PIE", "RET", "SIM", "ARG", "RUF"]
+ignore = [
+    "S104",    # binding 0.0.0.0 is deliberate; fail-closed check in main() covers it
+    "ASYNC240",  # one-time STATE.mkdir at startup; nothing else runs yet
+    "RUF001", "RUF002", "RUF003",  # UI copy/comments use deliberate typography
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S106", "ARG"]  # asserts + literal test tokens are the point
+"scripts/*" = ["S101", "S603", "S607"]  # dev harness: spawns local syncthing, asserts
+
 [tool.pyright]
 include = ["modelsync"]
 typeCheckingMode = "strict"

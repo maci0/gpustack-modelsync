@@ -21,8 +21,8 @@ def W(i, mounts=(), free=None):
 
 
 def st(**kw):
-    base = dict(complete=True, state="idle", errors=0, receive_only_changed=0,
-               global_bytes=100, local_bytes=100, completion=100.0, need_bytes=0)
+    base = {"complete": True, "state": "idle", "errors": 0, "receive_only_changed": 0,
+            "global_bytes": 100, "local_bytes": 100, "completion": 100.0, "need_bytes": 0}
     base.update(kw)
     return base
 

@@ -140,9 +140,9 @@ def test_syncstatus_clean():
     from modelsync.reconcile import SyncStatus
 
     def s(**kw):
-        d = dict(path="/p", worker_id=1, worker_name="n", completion=100.0,
-                 complete=True, state="idle", need_bytes=0, local_bytes=100,
-                 global_bytes=100, receive_only_changed=0, errors=0)
+        d = {"path": "/p", "worker_id": 1, "worker_name": "n", "completion": 100.0,
+             "complete": True, "state": "idle", "need_bytes": 0, "local_bytes": 100,
+             "global_bytes": 100, "receive_only_changed": 0, "errors": 0}
         d.update(kw)
         return SyncStatus(**d)
 

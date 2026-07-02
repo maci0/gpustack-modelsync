@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ipaddress
 import json
 import logging
@@ -48,10 +49,8 @@ def _load_json(path: Path, default):
         return json.loads(path.read_text())
     except (json.JSONDecodeError, OSError, ValueError):
         log.warning("corrupt state file %s; backing up and starting empty", path)
-        try:
+        with contextlib.suppress(OSError):
             path.replace(path.with_suffix(path.suffix + ".corrupt"))
-        except OSError:
-            pass
         return default
 
 
@@ -179,7 +178,7 @@ async def require_auth_query(
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_app: FastAPI):
     state.http = httpx.AsyncClient()
     state.gpustack = GPUStackClient(
         settings.gpustack_url,
@@ -202,10 +201,8 @@ async def lifespan(app: FastAPI):
     state.loop_task = asyncio.create_task(_background_loop())
     yield
     state.loop_task.cancel()
-    try:
+    with contextlib.suppress(asyncio.CancelledError):
         await state.loop_task  # let it finish so we don't close http under it
-    except asyncio.CancelledError:
-        pass
     await state.http.aclose()
 
 
@@ -269,21 +266,17 @@ async def _reconcile_core(
             log.warning("stuck %s: no clean verified copy to resolve from; manual check", stuck.path)
         else:
             log.info("resolving stuck %s from clean copy %s", stuck.path, by_id[auth].name)
-            try:
+            with contextlib.suppress(httpx.HTTPError):
                 # override: the clean copy's version becomes the cluster truth.
                 await client_for(by_id[auth]).override(fid)
-            except httpx.HTTPError:
-                pass
             # revert each stuck replica so it drops its divergent/poisoned local
             # and takes the clean version (pulls what's missing, deletes extras).
             # Safe: source is integrity-verified. Self-limiting: a reverted folder
             # goes to syncing, so it isn't re-detected as stuck (no reset loop).
             for r in rows:
                 if r.path == stuck.path and r.worker_id != auth and not r.complete and r.worker_id in by_id:
-                    try:
+                    with contextlib.suppress(httpx.HTTPError):
                         await client_for(by_id[r.worker_id]).revert(fid)
-                    except httpx.HTTPError:
-                        pass
 
     registered, deregistered = [], []
     if settings.register_in_gpustack:

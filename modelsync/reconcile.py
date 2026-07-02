@@ -30,7 +30,9 @@ def folder_id(path: str) -> str:
     paths (e.g. a/b vs a-b) from colliding to the same id."""
     p = path.strip("/")
     slug = re.sub(r"[^a-zA-Z0-9._-]", "-", p)[:80]
-    h = hashlib.sha1(p.encode()).hexdigest()[:8]
+    # sha1 is fine here: non-cryptographic id disambiguation, not integrity.
+    # Changing the algorithm would re-key every existing Syncthing folder.
+    h = hashlib.sha1(p.encode()).hexdigest()[:8]  # noqa: S324
     return f"{slug}-{h}"
 
 

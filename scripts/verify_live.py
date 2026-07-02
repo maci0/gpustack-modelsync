@@ -15,7 +15,7 @@ from pathlib import Path
 import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from modelsync.syncthing import SyncthingClient  # noqa: E402
+from modelsync.syncthing import SyncthingClient
 
 ROOT = Path.home() / ".cache" / "modelsync-verify"
 KEY = "verifykey-do-not-use-in-prod"
@@ -65,7 +65,7 @@ async def main() -> int:
                 n: SyncthingClient(f"http://127.0.0.1:{c['gui']}", KEY, http)
                 for n, c in NODES.items()
             }
-            for n, c in NODES.items():
+            for c in NODES.values():
                 await wait_ready(http, c["gui"])
 
             ids = {n: await cli[n].my_id() for n in NODES}
@@ -84,7 +84,7 @@ async def main() -> int:
             await cli["a"].put_device(ids["b"], "b", f"tcp://127.0.0.1:{NODES['b']['data']}")
             await cli["b"].put_device(ids["a"], "a", f"tcp://127.0.0.1:{NODES['a']['data']}")
             # set each node's own data listen address
-            for n, c in NODES.items():
+            for c in NODES.values():
                 await http.patch(
                     f"http://127.0.0.1:{c['gui']}/rest/config/options",
                     headers={"X-API-Key": KEY},

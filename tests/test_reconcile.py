@@ -110,7 +110,7 @@ async def test_no_source_skips_path():
     # neither target is a confirmed holder and neither has data (compl 0)
     workers = [W(1), W(2)]
     fakes = {1: FakeSync("DEV1", compl=0), 2: FakeSync("DEV2", compl=0)}
-    unreachable, warnings = await reconcile({"/c/m": {1, 2}}, workers, make(fakes), have={})
+    _unreachable, warnings = await reconcile({"/c/m": {1, 2}}, workers, make(fakes), have={})
     fid = folder_id("/c/m")
     assert fid not in fakes[1].folders and fid not in fakes[2].folders  # not wired
     assert any("no source" in w for w in warnings)
