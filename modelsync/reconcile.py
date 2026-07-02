@@ -162,18 +162,18 @@ async def reconcile(
                         and st["receive_only_changed"] > 0
                         and st["completion"] < src_compl  # strictly less complete
                     ) or (
-                        # Flag-clear revert: after an index reset, local files
-                        # hashed before the remote index arrives are misattributed
-                        # as local changes, leaving a COMPLETE byte-identical
-                        # replica marked diverged forever (complete -> never
-                        # "stuck", so nothing else clears it). With local==global,
-                        # need==0 and a 100% confirmed source, revert deletes
-                        # nothing: identical content is re-marked synced; a truly
-                        # diverged file is re-pulled from the clean source.
+                        # Converge a COMPLETE diverged replica toward a 100%
+                        # confirmed source. Divergence here = external local
+                        # writes (GPUStack re-verifying rewrites files; upstream
+                        # HF revisions drift) or index-reset misattribution;
+                        # receiveonly semantics say the source owns the content.
+                        # Identical blocks are just re-marked synced (no
+                        # transfer); differing files are replaced by the source's
+                        # version. Never fires toward an incomplete or
+                        # unconfirmed source (guards above/below).
                         st["complete"]
                         and st["receive_only_changed"] > 0
                         and st["need_bytes"] == 0
-                        and st["local_bytes"] == st["global_bytes"]
                         and src_compl >= 100
                     ):
                         await c.revert(fid)

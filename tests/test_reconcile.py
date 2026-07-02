@@ -142,25 +142,18 @@ async def test_diverged_replica_reverted_only_when_not_more_complete():
     assert fakes[2].reverted == []
 
 
-async def test_complete_replica_with_different_content_never_reverted():
-    # replica complete but its bytes DIFFER from global (local != global): reverting
-    # could destroy a good independently-present copy -> never revert.
+async def test_complete_diverged_replica_converges_to_clean_source():
+    # replica complete but diverged (external writes / index-reset artifact /
+    # upstream drift): with a 100% CONFIRMED source, revert converges it — the
+    # source owns the content (receiveonly semantics). Identical blocks don't
+    # re-transfer; diverged files take the source's version.
     path = "/c/m"
     workers = [W(1), W(2)]
-    fakes = {1: FakeSync("DEV1", compl=100), 2: FakeSync("DEV2", compl=100, diverged=999, local=2)}
-    await reconcile({path: {1, 2}}, workers, make(fakes), have={path: {1, 2}})
-    assert fakes[2].reverted == []
-
-
-async def test_complete_identical_replica_gets_flag_clear_revert():
-    # post-index-reset artifact: replica complete, byte-identical (local==global),
-    # but marked diverged. Revert is a safe flag-clear here and must fire, else the
-    # copy is 'complete but never clean' forever.
-    path = "/c/m"
-    workers = [W(1), W(2)]
-    fakes = {1: FakeSync("DEV1", compl=100), 2: FakeSync("DEV2", compl=100, diverged=999)}
-    await reconcile({path: {1, 2}}, workers, make(fakes), have={path: {1, 2}})
-    assert fakes[2].reverted == [folder_id(path)]
+    for local in (None, 2):  # byte-identical and genuinely-different local bytes
+        fakes = {1: FakeSync("DEV1", compl=100),
+                 2: FakeSync("DEV2", compl=100, diverged=999, local=local)}
+        await reconcile({path: {1, 2}}, workers, make(fakes), have={path: {1, 2}})
+        assert fakes[2].reverted == [folder_id(path)]
 
 
 async def test_unconfirmed_source_never_reverts():
