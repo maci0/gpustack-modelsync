@@ -298,6 +298,7 @@ async function reset(path){
   poll();
 }
 let rates={};  // cell -> {t,need,bps} : client-side transfer rate from poll deltas
+let unre={};   // cell -> consecutive unreachable polls (debounce restart blips)
 async function poll(){
   if(polling)return;               // no pile-up if /status is slow
   polling=true;
@@ -310,6 +311,8 @@ async function poll(){
       });
     }).catch(()=>{});
     const st=await jget('/status'); statusMap={};
+    st.forEach(s=>{const k=s.path+'@'+s.worker_id;
+      if(s.state==='unreachable')unre[k]=(unre[k]||0)+1; else delete unre[k];});
     const now=Date.now();
     st.forEach(s=>{
       const k=s.path+'@'+s.worker_id; statusMap[k]=s;
@@ -338,9 +341,10 @@ function tickAge(){
 }
 function updateStats(){
   const ns=vNodes(), ready=ns.filter(n=>n.state==='ready').length;
+  const hardUnre=s=>s.state==='unreachable'&&(unre[s.path+'@'+s.worker_id]||0)>=2;
   const vals=Object.values(statusMap);
   const syncing=vals.filter(s=>!s.complete&&!s.errors&&s.state!=='unreachable').length;
-  const errs=vals.filter(s=>s.errors>0||s.state==='unreachable').length;  // unreachable = problem, not progress
+  const errs=vals.filter(s=>s.errors>0||hardUnre(s)).length;  // debounced: no restart-blip alarm
   const pend=Object.keys(edits).length;
   $('stats').innerHTML=`<span>models <b>${models.length}</b></span><span>nodes <b>${ready}/${ns.length}</b> ready</span>`+
     `<span class="syn">syncing <b>${syncing}</b></span><span class="err">errors <b>${errs}</b></span>`+
@@ -355,7 +359,13 @@ function paint(){
     if(el.dataset.pending==='true'&&!s){under.innerHTML='<span class="badge b-dl" title="GPUStack is downloading this model here (not a sync source until done)">↓ downloading</span>';return;}
     if(s){
       if(s.errors>0){under.innerHTML='<span class="badge b-err" title="Syncthing error — ⟳ reset">error</span>';return;}
-      if(s.state==='unreachable'){under.innerHTML='<span class="badge b-err" title="Syncthing on this node not responding">unreachable</span>';return;}
+      if(s.state==='unreachable'){
+        // one failed poll = likely a restart blip; only alarm on the 2nd in a row
+        under.innerHTML=(unre[el.dataset.cell]||0)>=2
+          ?'<span class="badge b-err" title="Syncthing on this node not responding">unreachable</span>'
+          :'<span class="badge b-ghost" title="one missed poll; rechecking">checking…</span>';
+        return;
+      }
       if(!s.complete){
         const left=s.need_bytes?` · ${gib(s.need_bytes)} left`:'';
         under.innerHTML=`<div class="bar"><span style="width:${Number(s.completion)||0}%"></span></div><span class="pct">${(Number(s.completion)||0).toFixed(0)}% ${esc(s.state)}${left}${esc(rateTxt(el.dataset.cell,s.need_bytes))}</span>`;
