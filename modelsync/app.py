@@ -288,7 +288,7 @@ async def _reconcile_core(
     registered, deregistered = [], []
     if settings.register_in_gpustack:
         for path, targets in plan.items():
-            for wid in targets:
+            for wid in sorted(targets):  # deterministic order
                 k = _key(path, wid)
                 if (path, wid) not in done or wid in have.get(path, set()):
                     continue

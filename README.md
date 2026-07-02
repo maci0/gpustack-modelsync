@@ -198,7 +198,7 @@ The orchestrator mutates GPUStack and reconfigures Syncthing on every node, so:
 Three machine-checked layers, each covering what the others can't:
 
 ```bash
-uv run pytest -q                              # 92 unit + integration tests
+uv run pytest -q                              # unit + integration tests
 uv run pyright                                # strict type check, 0 errors
 uv run ruff check modelsync                   # lint, 0 errors
 ```
@@ -212,7 +212,7 @@ uv run ruff check modelsync                   # lint, 0 errors
   never raises, only degrades to a safe default. This covers the one place types
   can't — the dynamically-typed JSON boundary (`Any`), where the strict
   `reportUnknown*` rules are therefore disabled (see `[tool.pyright]`).
-- **Behavior (tested + live-validated).** 92 tests plus end-to-end runs on a real
+- **Behavior (tested + live-validated).** The pytest suite plus end-to-end runs on a real
   multi-node cluster (add → sync → register → remove → deregister, plus failure
   and recovery paths).
 

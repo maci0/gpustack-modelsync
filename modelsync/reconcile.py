@@ -220,7 +220,7 @@ async def collect_status(
     out: list[SyncStatus] = []
     for path, targets in plan.items():
         fid = folder_id(path)
-        for wid in targets:
+        for wid in sorted(targets):  # deterministic row order (stuck-pick depends on it)
             w = by_id.get(wid)
             if not w:
                 continue

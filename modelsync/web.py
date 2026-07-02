@@ -65,8 +65,15 @@ PAGE = """<!doctype html>
  #q{font:inherit;background:var(--card);border:1px solid #d3d8de;border-radius:8px;padding:7px 11px;width:210px;outline:none}
  #q:focus{border-color:var(--acc);box-shadow:0 0 0 2px rgba(0,123,255,.12)}
  #age{font-size:11px;color:var(--mut)} #age.stale{color:var(--bad)}
- .reset{background:#fff;border:1px solid #d3d8de;color:var(--mut);padding:2px 8px;font-size:12px;border-radius:6px;font-weight:500}
+ .reset,.cpy{background:#fff;border:1px solid #d3d8de;color:var(--mut);padding:2px 8px;font-size:12px;border-radius:6px;font-weight:500}
  .reset:hover{border-color:var(--warn);color:var(--warn)}
+ .cpy:hover{border-color:var(--acc);color:var(--acc)}
+ tr.dirtyrow td{background:#fffbe9}
+ tr.dirtyrow td:first-child{background:#fffbe9}
+ tr.dirtyrow:hover td,tr.dirtyrow:hover td:first-child{background:#fff7d6}
+ .stats .pend b{color:#d48806}
+ #mth{cursor:pointer;user-select:none}
+ .sortmark{color:var(--acc);font-weight:700}
  .cell{display:inline-flex;flex-direction:column;align-items:center;gap:5px;min-width:78px}
  .cell input{width:17px;height:17px;accent-color:var(--acc);cursor:pointer}
  .bar{position:relative;height:6px;width:70px;background:#f1f2f3;border-radius:3px;overflow:hidden}
@@ -105,7 +112,16 @@ const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;'
 const cluster=()=>$('cluster').value;
 const vNodes=()=>nodes.filter(n=>String(n.cluster_id)===cluster());
 const gib=b=>b?(b/1073741824).toFixed(b>1073741824?0:1)+'G':'0G';
-const selOf=m=>edits[m.path]||m.nodes;      // effective selection for a model
+// key-membership, NOT truthiness: an empty edit ([] = remove from ALL nodes) is
+// a real selection and must not fall back to the server plan.
+const selOf=m=>(m.path in edits)?edits[m.path]:m.nodes;
+const sameSet=(a,b)=>{if(a.length!==b.length)return false;const x=[...a].sort(),y=[...b].sort();return x.every((v,i)=>v===y[i]);};
+let sortBy='name';                          // 'name' | 'size' (click the model header)
+function pruneEdits(){                      // drop no-op edits; recompute dirty
+  models.forEach(m=>{ if(edits[m.path]&&sameSet(edits[m.path],m.nodes))delete edits[m.path]; });
+  dirty=Object.keys(edits).length>0;
+  $('apply').textContent=dirty?'Apply *':'Apply';
+}
 
 function hdrs(extra){const t=localStorage.getItem('modelsync_token')||'';return {...(t?{'X-Auth-Token':t}:{}),...extra};}
 async function api(u,opts){
@@ -164,12 +180,15 @@ function splitPath(p){
 }
 function visModels(){
   const q=$('q').value.trim().toLowerCase();
-  return q? models.filter(m=>m.path.toLowerCase().includes(q)) : models;
+  const vis=q? models.filter(m=>m.path.toLowerCase().includes(q)) : [...models];
+  return sortBy==='size'? vis.sort((a,b)=>b.size-a.size||a.path.localeCompare(b.path))
+                        : vis.sort((a,b)=>splitPath(a.path).name.localeCompare(splitPath(b.path).name));
 }
 function render(){
   const ns=vNodes(), vis=visModels();
   const allByNode=n=>models.length>0&&models.every(m=>selOf(m).includes(n.id));
-  $('head').innerHTML='<th>model</th>'+ns.map(n=>nodeHead(n,allByNode(n))).join('');
+  $('head').innerHTML=`<th id="mth" title="click to sort">model <span class="sortmark">${sortBy==='size'?'↓ size':'a–z'}</span></th>`+
+    ns.map(n=>nodeHead(n,allByNode(n))).join('');
   if(!vis.length){
     $('body').innerHTML=`<tr><td colspan="${ns.length+1}" class="empty">${models.length?'no models match the filter':'no models in GPUStack yet'}</td></tr>`;
     updateStats();return;
@@ -182,8 +201,10 @@ function render(){
     }).join('');
     const sp=splitPath(m.path);
     const rowAll=ns.length>0&&ns.every(n=>sel.includes(n.id));
-    return `<tr data-path="${esc(m.path)}"><td><span class="mpath">`+
+    const changed=!!edits[m.path];
+    return `<tr data-path="${esc(m.path)}"${changed?' class="dirtyrow"':''}><td><span class="mpath">`+
       `<button class="reset" data-path="${esc(m.path)}" title="recover a stuck/conflicted folder">⟳</button>`+
+      `<button class="cpy" data-path="${esc(m.path)}" title="copy model path">⧉</button>`+
       `<span class="mtxt"><div class="mname" title="${esc(m.path)}">${esc(sp.name)}</div>`+
       `<div class="morg">${esc(sp.org)} · ${gib(m.size)} · on ${m.have.length} node${m.have.length===1?'':'s'}</div></span>`+
       `<label class="allb" title="all nodes for this model"><input type="checkbox" class="rowall" ${rowAll?'checked':''}>all</label>`+
@@ -192,13 +213,14 @@ function render(){
   syncBulk();paint();
 }
 function rowOf(el){return el.closest('tr');}
-function recordRow(tr){  // read the row's boxes into edits + mark dirty
+function recordRow(tr){  // read the row's boxes into edits; no-op edits self-clear
   const path=tr.dataset.path;
   edits[path]=[...tr.querySelectorAll('input[data-n]')].filter(c=>c.checked).map(c=>+c.dataset.n);
-  dirty=true;$('apply').textContent='Apply *';
+  pruneEdits();
 }
 function syncBulk(){  // row-all + col-all reflect current selection (indeterminate when mixed)
   document.querySelectorAll('#body tr[data-path]').forEach(tr=>{
+    tr.classList.toggle('dirtyrow',!!edits[tr.dataset.path]);  // pending-change tint
     const boxes=[...tr.querySelectorAll('input[data-n]')], ra=tr.querySelector('.rowall');
     if(!ra||!boxes.length)return;
     const on=boxes.filter(b=>b.checked).length;
@@ -283,8 +305,10 @@ function updateStats(){
   const vals=Object.values(statusMap);
   const syncing=vals.filter(s=>!s.complete&&!s.errors&&s.state!=='unreachable').length;
   const errs=vals.filter(s=>s.errors>0||s.state==='unreachable').length;  // unreachable = problem, not progress
+  const pend=Object.keys(edits).length;
   $('stats').innerHTML=`<span>models <b>${models.length}</b></span><span>nodes <b>${ready}/${ns.length}</b> ready</span>`+
-    `<span class="syn">syncing <b>${syncing}</b></span><span class="err">errors <b>${errs}</b></span>`;
+    `<span class="syn">syncing <b>${syncing}</b></span><span class="err">errors <b>${errs}</b></span>`+
+    (pend?`<span class="pend">pending <b>${pend}</b></span>`:'');
 }
 function paint(){
   updateStats();
@@ -329,10 +353,25 @@ $('head').addEventListener('change',e=>{
     on?sel.add(id):sel.delete(id);
     edits[m.path]=[...sel];
   });
-  dirty=true;$('apply').textContent='Apply *';
+  pruneEdits();
   render();
 });
-$('body').addEventListener('click',e=>{ const b=e.target.closest('.reset'); if(b)reset(b.dataset.path); });
+$('head').addEventListener('click',e=>{
+  if(e.target.closest('#mth')){ sortBy=sortBy==='name'?'size':'name'; render(); }
+});
+$('body').addEventListener('click',e=>{
+  const b=e.target.closest('.reset'); if(b){reset(b.dataset.path);return;}
+  const c=e.target.closest('.cpy');
+  if(c){ copyText(c.dataset.path); $('msg').textContent='path copied'; }
+});
+function copyText(t){  // clipboard API needs https; textarea fallback works on http LAN
+  if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t);return;}
+  const ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.opacity='0';
+  document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();
+}
+document.addEventListener('keydown',e=>{  // '/' focuses the filter (like GitHub)
+  if(e.key==='/'&&!/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)){e.preventDefault();$('q').focus();}
+});
 
 (async()=>{await loadNodes();await loadModels();poll();})();
 setInterval(poll,3000);
@@ -470,7 +509,7 @@ async function doApply(){
     if(r.warnings&&r.warnings.length)p.push('⚠ '+r.warnings.join(' · '));
     setMsg(p.join(' · ')||'no changes');}
   catch(e){setMsg('error: '+e.message);}
-  dirty=false;apply.textContent='Apply';load();
+  dirty=false;apply.textContent='Apply';await load();
 }
 async function reset(path){setMsg('resetting…');try{const r=await gm('POST','/reset',{path});
   setMsg(r.ok===false?('reset: '+(r.error||'failed')):('reset → '+((r.actions||[]).join(' · ')||'no targets')));}
