@@ -129,6 +129,7 @@ class State:
     ev_tasks: dict[int, tuple[str, asyncio.Task[None]]]  # wid -> (ip, watcher task)
     watch_tasks: list[asyncio.Task[None]]
     net_prev: dict[int, tuple[float, int, int]]  # wid -> (t, in_total, out_total)
+    stuck_seen: dict[tuple[str, int], int]  # (path, wid) -> consecutive stuck passes
     counters: dict[str, int]
     metrics: dict[str, float]
 
@@ -233,6 +234,7 @@ async def lifespan(_app: FastAPI):
     state.dev_ids = {}
     state.ev_tasks = {}
     state.net_prev = {}
+    state.stuck_seen = {}
     state.counters = {"registered": 0, "deregistered": 0, "stuck_resolved": 0, "reconciles": 0}
     state.metrics = {}
     if not settings.auth_token:
@@ -303,13 +305,21 @@ async def _reconcile_core(
     # it won't re-trigger (no loop). No complete copy anywhere -> surface, no act.
     by_id = {w.id: w for w in workers}
     working = ("scanning", "syncing", "sync-preparing", "cleaning")
-    stuck = next(
-        (r for r in rows
-         if not r.complete and r.need_bytes > 0
-         and r.state not in working and r.worker_id in by_id
-         and r.path not in state.resetting),  # don't fight an in-flight /reset
-        None,
-    )
+    stuck_rows = [
+        r for r in rows
+        if not r.complete and r.need_bytes > 0
+        and r.state not in working and r.worker_id in by_id
+        and r.path not in state.resetting  # don't fight an in-flight /reset
+    ]
+    # Track consecutive stuck passes per (path, node); anything that started
+    # moving (or completed) resets its counter. Drives the heavy-reset escalation.
+    stuck_keys = {(r.path, r.worker_id) for r in stuck_rows}
+    for key in list(state.stuck_seen):
+        if key not in stuck_keys:
+            del state.stuck_seen[key]
+    for key in stuck_keys:
+        state.stuck_seen[key] = state.stuck_seen.get(key, 0) + 1
+    stuck = stuck_rows[0] if stuck_rows else None
     if stuck:
         fid = folder_id(stuck.path)
         # Authoritative = a Syncthing-CLEAN copy (self-consistent, hash-verified,
@@ -336,6 +346,17 @@ async def _reconcile_core(
                 if r.path == stuck.path and r.worker_id != auth and not r.complete and r.worker_id in by_id:
                     with contextlib.suppress(httpx.HTTPError):
                         await client_for(by_id[r.worker_id]).revert(fid)
+                    # Escalate: override+revert provably can't clear the
+                    # remove->re-add stall (folder idle at 0% with a connected
+                    # peer). After 3 stuck passes, drop the replica's index db so
+                    # it rebuilds from the clean source. Index-only: files are
+                    # never touched, and there's a verified clean copy to pull from.
+                    key = (r.path, r.worker_id)
+                    if state.stuck_seen.get(key, 0) >= 3:
+                        log.warning("stuck %s on %s after %d passes; heavy-resetting its index",
+                                    r.path, by_id[r.worker_id].name, state.stuck_seen[key])
+                        await _heavy_reset(client_for(by_id[r.worker_id]), fid)
+                        state.stuck_seen[key] = 0
 
     registered, deregistered = [], []
     if settings.register_in_gpustack:

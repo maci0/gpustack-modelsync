@@ -80,6 +80,15 @@ class FakeSt:
     async def folder_status(self, fid):
         return self.st
 
+    async def set_paused(self, fid, p):
+        self.pauses = [*getattr(self, "pauses", []), p]
+
+    async def is_paused(self, fid):
+        return True
+
+    async def reset_folder_db(self, fid):
+        self.index_reset = True
+
 
 def _setup(monkeypatch, complete=True, mf=None):
     A.state.plan = {}
@@ -89,6 +98,7 @@ def _setup(monkeypatch, complete=True, mf=None):
     A.state.pins = {}
     A.state.dev_ids = {}
     A.state.ev_tasks = {}
+    A.state.stuck_seen = {}
     A.state.counters = {"registered": 0, "deregistered": 0, "stuck_resolved": 0, "reconciles": 0}
     A.state.metrics = {}
     gp = FakeGP(mf)
@@ -150,6 +160,18 @@ async def test_resolves_stuck_folder_from_clean_copy(monkeypatch):
     await A._reconcile_core({"/m": {1, 2}}, [W(1), W(2)], [F("/m", nodes=[1, 2])])
     assert sts[1].overrode      # clean copy forced authoritative
     assert sts[2].reverted      # stuck replica reverted toward it
+
+
+async def test_stuck_escalates_to_heavy_reset_after_3_passes(monkeypatch):
+    _setup(monkeypatch)
+    sts = {1: FakeSt(status=_status(complete=True, local=100, glob=100)),
+           2: FakeSt(status=_status(complete=False, need=50, local=0, glob=100))}
+    monkeypatch.setattr(A, "client_for", lambda w: sts[w.id])
+    for _ in range(3):  # pass 1+2: override+revert only; pass 3: heavy reset
+        await A._reconcile_core({"/m": {1, 2}}, [W(1), W(2)], [F("/m", nodes=[1, 2])])
+    assert getattr(sts[2], "index_reset", False)        # escalated on the 3rd pass
+    assert not getattr(sts[1], "index_reset", False)    # clean source untouched
+    assert A.state.stuck_seen[("/m", 2)] == 0           # counter reset after escalation
 
 
 async def _run_reconcile(sts, have):
