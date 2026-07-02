@@ -65,9 +65,11 @@ PAGE = """<!doctype html>
  #q{font:inherit;background:var(--card);border:1px solid #d3d8de;border-radius:8px;padding:7px 11px;width:210px;outline:none}
  #q:focus{border-color:var(--acc);box-shadow:0 0 0 2px rgba(0,123,255,.12)}
  #age{font-size:11px;color:var(--mut)} #age.stale{color:var(--bad)}
- .reset,.cpy{background:#fff;border:1px solid #d3d8de;color:var(--mut);padding:2px 8px;font-size:12px;border-radius:6px;font-weight:500}
+ .reset,.cpy,.purge{background:#fff;border:1px solid #d3d8de;color:var(--mut);padding:2px 8px;font-size:12px;border-radius:6px;font-weight:500}
  .reset:hover{border-color:var(--warn);color:var(--warn)}
  .cpy:hover{border-color:var(--acc);color:var(--acc)}
+ .purge{padding:0 5px;font-size:11px;vertical-align:middle}
+ .purge:hover{border-color:var(--bad);color:var(--bad)}
  tr.dirtyrow td{background:#fffbe9}
  tr.dirtyrow td:first-child{background:#fffbe9}
  tr.dirtyrow:hover td,tr.dirtyrow:hover td:first-child{background:#fff7d6}
@@ -162,6 +164,7 @@ function nodeHead(n,allOn){
   const gpu=n.gpu_name?`<div class="gpu" title="${esc(n.gpu_name)}">${esc(n.gpu_name)}</div>`:'';
   return `<th><div class="nname">${esc(n.name)}</div><div class="nstate ${cls}">${esc(n.state||'')}</div>`+
     gpu+vram+`<div class="nfree">${n.free_bytes?gib(n.free_bytes)+' free':''}</div>`+
+    `<div class="nfree" data-net="${esc(n.id)}"></div>`+
     `<input type="checkbox" class="colall" data-n="${esc(n.id)}" title="all models on ${esc(n.name)}" ${allOn?'checked':''}></th>`;
 }
 function updateFoot(){  // per-node capacity preview: new bytes the plan would pull
@@ -273,6 +276,13 @@ async function poll(){
   if(polling)return;               // no pile-up if /status is slow
   polling=true;
   try{
+    jget('/net').then(net=>{  // real Syncthing rates per node (best-effort)
+      document.querySelectorAll('[data-net]').forEach(el=>{
+        const d=net[el.dataset.net];
+        el.textContent=d&&(d.in_bps>1e4||d.out_bps>1e4)
+          ?`⇣${(d.in_bps/1048576).toFixed(1)} ⇡${(d.out_bps/1048576).toFixed(1)} MB/s`:'';
+      });
+    }).catch(()=>{});
     const st=await jget('/status'); statusMap={};
     const now=Date.now();
     st.forEach(s=>{
@@ -328,7 +338,11 @@ function paint(){
         : '<span class="badge b-pending" title="synced; registering in GPUStack">registering…</span>';
       return;
     }
-    under.innerHTML = have ? '<span class="badge b-ghost" title="present in GPUStack, not managed here">present</span>' : '';
+    if(have){
+      const cb=el.querySelector('input[data-n]');
+      const purge=cb&&!cb.checked?' <button class="purge" title="reclaim disk: delete this copy from the node">🗑</button>':'';
+      under.innerHTML='<span class="badge b-ghost" title="present in GPUStack, not managed here">present</span>'+purge;
+    }else under.innerHTML='';
   });
 }
 // event delegation (no inline handlers -> CSP-safe)
@@ -362,8 +376,24 @@ $('head').addEventListener('click',e=>{
 $('body').addEventListener('click',e=>{
   const b=e.target.closest('.reset'); if(b){reset(b.dataset.path);return;}
   const c=e.target.closest('.cpy');
-  if(c){ copyText(c.dataset.path); $('msg').textContent='path copied'; }
+  if(c){ copyText(c.dataset.path); $('msg').textContent='path copied'; return; }
+  const g=e.target.closest('.purge');
+  if(g){
+    const key=g.closest('[data-cell]').dataset.cell;
+    const i=key.lastIndexOf('@'), path=key.slice(0,i), wid=+key.slice(i+1);  // path may contain '@'
+    doPurge(path,wid);
+  }
 });
+async function doPurge(path,wid){
+  const name=splitPath(path).name;
+  if(!confirm(`Delete the copy of ${name} on node ${wid}?\\nRemoves GPUStack's record AND the files on disk there. Other nodes keep theirs.`))return;
+  $('msg').textContent='purging…';
+  try{
+    const r=await jpost('/purge',{path,worker_id:wid,delete_files:true});
+    $('msg').textContent = r.ok===false ? 'purge: '+esc(r.error||'failed') : 'purged — '+(r.actions||[]).map(esc).join(' · ');
+  }catch(e){ $('msg').textContent='purge failed: '+e.message; }
+  await loadModels(); poll();
+}
 function copyText(t){  // clipboard API needs https; textarea fallback works on http LAN
   if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t);return;}
   const ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.opacity='0';

@@ -79,23 +79,29 @@ async def reconcile(
     client_for: ClientFor,
     data_port: int = 22000,
     have: dict[str, set[int]] | None = None,
+    max_send_kbps: int = 0,
+    max_recv_kbps: int = 0,
+    dev_out: dict[int, str] | None = None,
 ) -> tuple[list[int], list[str]]:
     """Wire Syncthing shares to match the plan. Returns (unreachable_ids,
-    warnings). A node we can't reach is skipped, not fatal."""
+    warnings). A node we can't reach is skipped, not fatal. dev_out, if given,
+    collects worker_id -> Syncthing device id (for remote-completion fallback)."""
     have = have or {}
     by_id = {w.id: w for w in workers}
     warnings: list[str] = []
 
-    # 1. device id + LAN-only per node; skip unreachable.
+    # 1. device id + LAN-only + bandwidth caps per node; skip unreachable.
     dev_id: dict[int, str] = {}
     unreachable: set[int] = set()
     for w in workers:
         try:
             c = client_for(w)
-            await c.enforce_local_only()
+            await c.enforce_local_only(max_send_kbps, max_recv_kbps)
             dev_id[w.id] = await c.my_id()
         except _NET_ERRORS:
             unreachable.add(w.id)
+    if dev_out is not None:
+        dev_out.update(dev_id)
 
     desired: dict[int, dict[str, str]] = {}  # wid -> {folder_id: path}
 
@@ -134,6 +140,7 @@ async def reconcile(
                 for o in peers:
                     await c.put_device(dev_id[o], by_id[o].name, _addr(by_id[o], data_port))
                 await c.put_folder(fid, path, [dev_id[o] for o in peers], ftype)
+                await c.set_ignores(fid)  # partial/temp files never replicate
                 if wid == src and src_confirmed:
                     st = status.get(src)
                     # Source idle but "needing" bytes = replicas diverge from it
@@ -217,15 +224,19 @@ async def collect_status(
     plan: dict[str, set[int]],
     workers: list[Worker],
     client_for: ClientFor,
+    dev_ids: dict[int, str] | None = None,
 ) -> list[SyncStatus]:
+    """Per (path, node) sync status. If a node's own GUI is unreachable, fall
+    back to a reachable PEER's view of it (db/completion by device id) so the
+    row shows real progress instead of a blind 'unreachable'."""
+    dev_ids = dev_ids or {}
     by_id = {w.id: w for w in workers}
     out: list[SyncStatus] = []
     for path, targets in plan.items():
         fid = folder_id(path)
-        for wid in sorted(targets):  # deterministic row order (stuck-pick depends on it)
-            w = by_id.get(wid)
-            if not w:
-                continue
+        tsorted = sorted(t for t in targets if t in by_id)
+        for wid in tsorted:  # deterministic row order (stuck-pick depends on it)
+            w = by_id[wid]
             try:
                 s = await client_for(w).folder_status(fid)
                 out.append(
@@ -236,7 +247,33 @@ async def collect_status(
                     )
                 )
             except _NET_ERRORS:
-                out.append(SyncStatus(path, wid, w.name, 0.0, state="unreachable"))
+                pct = await _peer_view(fid, wid, tsorted, by_id, client_for, dev_ids)
+                if pct is None:
+                    out.append(SyncStatus(path, wid, w.name, 0.0, state="unreachable"))
+                else:
+                    out.append(SyncStatus(path, wid, w.name, pct, state="remote-view"))
     return out
+
+
+async def _peer_view(
+    fid: str,
+    wid: int,
+    targets: list[int],
+    by_id: dict[int, Worker],
+    client_for: ClientFor,
+    dev_ids: dict[int, str],
+) -> float | None:
+    """A reachable peer's view of `wid`'s completion, else None."""
+    dev = dev_ids.get(wid)
+    if not dev:
+        return None
+    for other in targets:
+        if other == wid:
+            continue
+        try:
+            return await client_for(by_id[other]).remote_completion(fid, dev)
+        except _NET_ERRORS:
+            continue
+    return None
 
 

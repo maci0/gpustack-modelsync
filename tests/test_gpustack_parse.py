@@ -46,6 +46,30 @@ def test_maintenance_on():
     assert _maintenance_on(True) is True
 
 
+def test_mf_ready_states():
+    from modelsync.gpustack import _mf_ready
+    assert _mf_ready({})                          # no state (older API) -> ready
+    assert _mf_ready({"state": "READY"})
+    assert not _mf_ready({"state": "downloading"})
+    assert not _mf_ready({"state": "error"})
+    assert _mf_ready({"state": 5})                # non-str garbage -> treated ready
+
+
+async def test_model_folders_excludes_downloading_nodes():
+    gp = GPUStackClient("http://x", "t", None)
+
+    async def fl(p, **k):
+        return [
+            {"worker_id": 1, "local_dir": "/var/lib/gpustack/m", "size": 10, "state": "ready"},
+            {"worker_id": 2, "local_dir": "/var/lib/gpustack/m", "size": 10, "state": "downloading"},
+        ]
+
+    gp._list = fl
+    f = (await gp.model_folders())[0]
+    assert f.current_nodes == [1]        # only the READY holder counts
+    assert f.pending_nodes == [2]        # downloader surfaced, never a source
+
+
 async def test_workers_parse_and_ip_filter():
     gp = GPUStackClient("http://x", "t", None, allowed_cidrs=["10.0.0.0/8"])
 

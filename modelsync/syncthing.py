@@ -26,6 +26,13 @@ LOCAL_ONLY_OPTIONS: dict[str, Any] = {
     "startBrowser": False,
 }
 
+# Never replicate partial artifacts: GPUStack's own downloader writes temp files
+# while pulling a model; syncing those would ship garbage to replicas.
+IGNORE_PATTERNS = [
+    "*.tmp", "*.part", "*.partial", "*.download", "*.crdownload",
+    "~*", ".locks", "*.lock", ".DS_Store",
+]
+
 
 class SyncthingClient:
     def __init__(
@@ -51,9 +58,48 @@ class SyncthingClient:
         r = await self._req("GET", "/rest/system/status")
         return r.json()["myID"]
 
-    async def enforce_local_only(self) -> None:
-        # PATCH merges into existing options.
-        await self._req("PATCH", "/rest/config/options", json=LOCAL_ONLY_OPTIONS)
+    async def enforce_local_only(self, max_send_kbps: int = 0, max_recv_kbps: int = 0) -> None:
+        # PATCH merges into existing options. Bandwidth caps ride along so a big
+        # model sync can't saturate the LAN while nodes serve inference (0 = off).
+        opts = {**LOCAL_ONLY_OPTIONS, "maxSendKbps": max_send_kbps, "maxRecvKbps": max_recv_kbps}
+        await self._req("PATCH", "/rest/config/options", json=opts)
+
+    async def set_ignores(self, folder_id: str, patterns: list[str] | None = None) -> None:
+        """Install ignore patterns so partial/temp files never replicate."""
+        await self._req(
+            "POST", "/rest/db/ignores", params={"folder": folder_id},
+            json={"ignore": patterns if patterns is not None else IGNORE_PATTERNS},
+        )
+
+    async def connections(self) -> dict[str, Any]:
+        """Live per-device connection state + byte counters (system/connections):
+        who's actually connected, and totals for orchestrator-side rate deltas."""
+        r = await self._req("GET", "/rest/system/connections")
+        d = r.json()
+        return d if isinstance(d, dict) else {}
+
+    async def remote_completion(self, folder_id: str, device_id: str) -> float:
+        """This node's view of ANOTHER device's completion for a folder — status
+        for a replica whose own GUI is unreachable."""
+        r = await self._req(
+            "GET", "/rest/db/completion", params={"folder": folder_id, "device": device_id}
+        )
+        d = r.json()
+        c = d.get("completion") if isinstance(d, dict) else None
+        return float(c) if isinstance(c, (int, float)) and not isinstance(c, bool) else 0.0
+
+    async def events(self, since: int, kinds: str, timeout_s: int = 55) -> list[dict[str, Any]]:
+        """Long-poll the events API. Returns [] on timeout (no events)."""
+        r = await self._http.request(
+            "GET",
+            f"{self._base}/rest/events",
+            headers=self._headers,
+            params={"since": since, "events": kinds, "timeout": timeout_s},
+            timeout=timeout_s + 15,
+        )
+        r.raise_for_status()
+        d = r.json()
+        return d if isinstance(d, list) else []
 
     async def put_device(self, device_id: str, name: str, address: str) -> None:
         await self._req(

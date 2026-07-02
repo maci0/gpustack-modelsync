@@ -50,6 +50,7 @@ class ModelFolder(BaseModel):
     label: str
     size: int
     current_nodes: list[int]
+    pending_nodes: list[int] = []  # GPUStack still downloading there (never a source)
     spec: dict[str, str] = {}
 
 
@@ -175,6 +176,7 @@ class GPUStackClient:
 
     async def model_folders(self) -> list[ModelFolder]:
         nodes: dict[str, set[int]] = {}
+        pending: dict[str, set[int]] = {}
         # size per (path, worker): sum shards WITHIN a worker, then take the max
         # ACROSS workers — the model size is one full copy, not the total of every
         # node's copy (summing across nodes would report N× the real size).
@@ -188,23 +190,77 @@ class GPUStackClient:
                 log.warning("model path %s outside cache roots, ignoring", path)
                 continue
             nodes.setdefault(path, set())
+            pending.setdefault(path, set())
             wid = mf.get("worker_id")
             bucket = size_bw.setdefault(path, {})
             key = wid if wid is not None else -1
             bucket[key] = bucket.get(key, 0) + _int(mf.get("size"))  # safe: malformed size -> 0
             spec.setdefault(path, {k: mf[k] for k in _SPEC_KEYS if mf.get(k)})
             if wid is not None:
-                nodes[path].add(wid)
+                # A file GPUStack is still downloading must never make its node a
+                # holder/source (we'd replicate a partial copy cluster-wide).
+                if _mf_ready(mf):
+                    nodes[path].add(wid)
+                else:
+                    pending[path].add(wid)
         return [
             ModelFolder(
                 path=p,
                 label=os.path.basename(p) or p,
                 size=max(size_bw.get(p, {}).values(), default=0),
                 current_nodes=sorted(w),
+                pending_nodes=sorted(pending.get(p, set()) - w),
                 spec=spec.get(p, {}),
             )
             for p, w in sorted(nodes.items())
         ]
+
+    async def find_model_file(self, path: str, worker_id: int) -> int | None:
+        """Model-file id for (dir, worker) — used by purge to remove GPUStack's
+        record (and optionally the on-disk files) for one node's copy."""
+        for mf in await self._list(f"{self._v}/model-files"):
+            if mf.get("worker_id") == worker_id and _model_dir(mf) == path:
+                mid = mf.get("id")
+                return mid if isinstance(mid, int) else None
+        return None
+
+    async def models(self) -> list[dict[str, Any]]:
+        """Model deployments (id, name, source spec, worker_selector) — for
+        matching a synced folder to the Models that serve it (pin)."""
+        out = []
+        for m in await self._list(f"{self._v}/models"):
+            if isinstance(m, dict) and isinstance(m.get("id"), int):
+                out.append(m)
+        return out
+
+    async def get_model(self, model_id: int) -> dict[str, Any] | None:
+        try:
+            d = await self._get(f"{self._v}/models/{model_id}")
+            return d if isinstance(d, dict) else None
+        except httpx.HTTPError:
+            return None
+
+    async def set_model_selector(self, model_id: int, selector: dict[str, str]) -> None:
+        """Fetch-mutate-put: only worker_selector changes, everything else kept."""
+        m = await self.get_model(model_id)
+        if m is None:
+            raise httpx.HTTPError(f"model {model_id} not found")
+        m["worker_selector"] = selector
+        r = await self._http.put(
+            f"{self._base}{self._v}/models/{model_id}", headers=self._headers, json=m, timeout=15
+        )
+        r.raise_for_status()
+
+    async def set_worker_labels(self, worker_id: int, labels: dict[str, str]) -> None:
+        """Fetch-mutate-put the worker's full label map."""
+        w = await self._get(f"{self._v}/workers/{worker_id}")
+        if not isinstance(w, dict):
+            raise httpx.HTTPError(f"worker {worker_id} not found")
+        w["labels"] = labels
+        r = await self._http.put(
+            f"{self._base}{self._v}/workers/{worker_id}", headers=self._headers, json=w, timeout=15
+        )
+        r.raise_for_status()
 
     async def clusters(self) -> list[dict[str, Any]]:
         """id -> display name for the cluster selector. Best-effort: purely
@@ -244,10 +300,11 @@ class GPUStackClient:
             )
         return out
 
-    async def watch_workers(self) -> AsyncIterator[bytes]:
+    async def watch(self, resource: str) -> AsyncIterator[bytes]:
+        """SSE watch stream for a list resource (workers, model-files, ...)."""
         async with self._http.stream(
             "GET",
-            f"{self._base}{self._v}/workers",
+            f"{self._base}{self._v}/{resource}",
             headers=self._headers,
             params={"watch": "true"},
             timeout=None,
@@ -256,6 +313,10 @@ class GPUStackClient:
             async for line in r.aiter_lines():
                 if line.startswith("data:"):
                     yield line.encode()
+
+    async def watch_workers(self) -> AsyncIterator[bytes]:
+        async for line in self.watch("workers"):
+            yield line
 
     async def register_synced(self, worker_id: int, spec: dict[str, str]) -> int | None:
         """Register a synced model onto a worker by cloning the source model's
@@ -276,12 +337,15 @@ class GPUStackClient:
         except httpx.HTTPError:
             return None
 
-    async def delete_model_file(self, model_file_id: int) -> None:
+    async def delete_model_file(self, model_file_id: int, cleanup: bool = False) -> None:
+        """Delete the model-file record; cleanup=True also removes the files on
+        disk (GPUStack worker does the deletion — we never touch bytes directly)."""
         r = await self._http.request(
             "DELETE",
             f"{self._base}{self._v}/model-files/{model_file_id}",
             headers=self._headers,
-            timeout=15,
+            params={"cleanup": "true"} if cleanup else None,
+            timeout=30,
         )
         if r.status_code not in (200, 204, 404):
             r.raise_for_status()
@@ -307,6 +371,13 @@ def _first_str(*vals) -> str | None:
         if isinstance(v, str) and v:
             return v
     return None
+
+
+def _mf_ready(mf: dict[str, Any]) -> bool:
+    """GPUStack finished downloading this model-file. Unknown/missing state (older
+    API versions) counts as ready; an explicit in-progress/error state does not."""
+    st = mf.get("state")
+    return not isinstance(st, str) or st.lower() in ("ready", "completed", "done")
 
 
 def _model_dir(mf: dict[str, Any]) -> str | None:

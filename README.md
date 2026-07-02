@@ -58,9 +58,28 @@ GPUStack server ──/v2/workers──▶ orchestrator ──Syncthing REST─�
   override on the source, and for a replica whose index is poisoned, pause → drop
   its index DB → unpause so it rebuilds from the source. Healthy replicas just
   revert (no-op).
-- **GPUStack-matched UI.** Light theme, primary green `#54cc98` — the same
-  palette as the GPUStack dashboard. Per-node GPU/VRAM/util headers, a summary
-  bar (models / nodes ready / syncing / errors), and per-model reset.
+- **GPUStack-matched UI.** Styled with the design tokens from the gpustack-ui
+  source (primary `#007BFF`, success `#54cc98`, antd table/tags). Per-node
+  GPU/VRAM/util headers with live transfer rates, summary bar, filter, bulk
+  row/column selection, capacity preview footer, per-model reset + copy-path,
+  per-copy purge.
+- **Event-driven.** Watches each node's Syncthing events (folder completion /
+  errors) and GPUStack's SSE streams (worker + model-file create/delete): a
+  finished sync registers within seconds; the interval is only a fallback.
+- **Never ships partials.** Nodes GPUStack is still downloading to are never
+  used as a sync source, and `.stignore` patterns exclude temp/partial files
+  from replication.
+- **Scheduler pinning (opt-in).** `POST /pin {path, model_id}` labels every node
+  holding the folder and points the Model's `worker_selector` at that label, so
+  GPUStack schedules instances onto nodes that already have the weights;
+  reconcile keeps labels current as copies appear/disappear. `/unpin` restores
+  the original selector.
+- **Disk reclaim.** `POST /purge {path, worker_id, delete_files}` (or the 🗑
+  button) removes one node's copy: unshare + deregister + optionally have
+  GPUStack delete the files. Refused while an instance is running from it.
+- **Observability.** `GET /metrics` (Prometheus): rows/complete/clean/errors,
+  plan size, unreachable nodes, registered/deregistered/stuck-resolved counters.
+  `GET /net`: per-node connected peers + real transfer rates.
 
 ## What it does NOT do (be clear)
 
@@ -131,7 +150,8 @@ keep it on the cluster network. (Both handled by `hostNetwork` in `k8s.yaml`.)
 | `SYNCTHING_GUI_PORT` | `8384` | per-worker Syncthing GUI |
 | `SYNCTHING_DATA_PORT` | `22000` | per-worker Syncthing data |
 | `REGISTER_IN_GPUSTACK` | `true` | after sync, register the model on the new node in GPUStack (clone source spec); deregister on removal |
-| `RECONCILE_INTERVAL` | `15` | seconds between background reconcile passes |
+| `RECONCILE_INTERVAL` | `15` | fallback seconds between reconcile passes; Syncthing/GPUStack **events wake the loop immediately**, so completed syncs register within seconds |
+| `SYNC_MAX_SEND_KBPS` / `SYNC_MAX_RECV_KBPS` | `0` (off) | cap Syncthing transfer rates on every node so a model sync can't saturate the LAN during inference |
 | `STATE_DIR` | `.` | dir for plan/registry/members (mount a volume here) |
 | `LISTEN_PORT` | `8585` | orchestrator UI |
 

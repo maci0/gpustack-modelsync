@@ -1,0 +1,30 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - name: sync
+        run: uv sync --frozen
+      - name: ruff
+        run: uv run ruff check modelsync tests scripts
+      - name: pyright
+        run: uv run pyright
+      - name: mypy
+        run: uv run --with mypy mypy modelsync --ignore-missing-imports
+      - name: pytest
+        run: uv run pytest -q
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: docker build
+        run: docker build -t gpustack-modelsync:ci .

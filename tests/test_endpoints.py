@@ -37,7 +37,9 @@ class FakeGP:
 
 
 class FakeSt:
-    async def enforce_local_only(self): pass
+    async def enforce_local_only(self, *a): pass
+    async def set_ignores(self, fid, patterns=None): pass
+    async def remote_completion(self, fid, dev): return 0.0
     async def my_id(self): return "DEV"
     async def put_device(self, *a): pass
     async def put_folder(self, *a, **k): pass
@@ -94,3 +96,17 @@ def test_suggest_lists_running_not_in_plan(client):
 def test_reset_unknown_path(client):
     r = client.post("/reset", json={"path": "/not/planned"}).json()
     assert r["ok"] is False and "not in current plan" in r["error"]
+
+
+def test_metrics_prometheus_format(client):
+    A.state.metrics = {"rows": 4, "rows_clean": 4}
+    A.state.counters = {"registered": 2, "deregistered": 1, "stuck_resolved": 0, "reconciles": 9}
+    body = client.get("/metrics").text
+    assert "modelsync_rows 4" in body and "modelsync_registered_total 2" in body
+    assert "# TYPE modelsync_reconciles_total counter" in body
+
+
+def test_purge_refuses_running_instance(client):
+    r = client.post("/purge", json={"path": "/var/lib/gpustack/m", "worker_id": 1,
+                                    "delete_files": True}).json()
+    assert r["ok"] is False and "instance is running" in r["error"]  # fixture serves there

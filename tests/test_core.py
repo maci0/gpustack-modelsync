@@ -46,8 +46,14 @@ class FakeSt:
         if self.fail_at == where:
             raise httpx.HTTPError(f"down@{where}")
 
-    async def enforce_local_only(self):
+    async def enforce_local_only(self, *a):
         self._maybe_fail("enforce")
+
+    async def set_ignores(self, fid, patterns=None):
+        pass
+
+    async def remote_completion(self, fid, dev):
+        raise httpx.HTTPError("no peer view in this fake")
 
     async def my_id(self):
         return f"DEV{id(self) % 1000}"
@@ -80,6 +86,11 @@ def _setup(monkeypatch, complete=True, mf=None):
     A.state.registry = {}
     A.state.members = set()
     A.state.resetting = set()
+    A.state.pins = {}
+    A.state.dev_ids = {}
+    A.state.ev_tasks = {}
+    A.state.counters = {"registered": 0, "deregistered": 0, "stuck_resolved": 0, "reconciles": 0}
+    A.state.metrics = {}
     gp = FakeGP(mf)
     A.state.gpustack = gp
     monkeypatch.setattr(A, "client_for", lambda w: FakeSt(complete))

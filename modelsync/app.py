@@ -30,6 +30,7 @@ STATE = Path(settings.state_dir)
 PLAN_FILE = STATE / "plan.json"
 REGISTRY_FILE = STATE / "registry.json"  # (wid@path) -> gpustack model-file id WE made
 MEMBERS_FILE = STATE / "members.json"
+PINS_FILE = STATE / "pins.json"  # model_id -> {path, label, prev_selector}
 
 
 def _key(path: str, wid: int) -> str:
@@ -98,15 +99,38 @@ def save_members(m: set[int]) -> None:
     _atomic_write(MEMBERS_FILE, json.dumps(sorted(m)))
 
 
+def load_pins() -> dict[str, dict[str, Any]]:
+    raw = _load_json(PINS_FILE, {})
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        k: v for k, v in raw.items()
+        if isinstance(k, str) and k.isdigit() and isinstance(v, dict)
+        and isinstance(v.get("path"), str) and isinstance(v.get("label"), str)
+    }
+
+
+def save_pins(p: dict[str, dict[str, Any]]) -> None:
+    _atomic_write(PINS_FILE, json.dumps(p))
+
+
 class State:
     http: httpx.AsyncClient
     gpustack: GPUStackClient
     plan: dict[str, set[int]]
     registry: dict[str, int]
     members: set[int]
+    pins: dict[str, dict[str, Any]]  # model_id -> {path, label, prev_selector}
     resetting: set[str]  # paths under an in-flight /reset; background loop skips them
     lock: asyncio.Lock
     loop_task: asyncio.Task[None]
+    wake: asyncio.Event  # set by event watchers -> reconcile now, not next tick
+    dev_ids: dict[int, str]  # worker id -> Syncthing device id (peer-view fallback)
+    ev_tasks: dict[int, tuple[str, asyncio.Task[None]]]  # wid -> (ip, watcher task)
+    watch_tasks: list[asyncio.Task[None]]
+    net_prev: dict[int, tuple[float, int, int]]  # wid -> (t, in_total, out_total)
+    counters: dict[str, int]
+    metrics: dict[str, float]
 
 
 state = State()
@@ -194,15 +218,38 @@ async def lifespan(_app: FastAPI):
     state.plan = load_plan()
     state.registry = load_registry()
     state.members = load_members()
+    state.pins = load_pins()
     state.resetting = set()
     state.lock = asyncio.Lock()
+    state.wake = asyncio.Event()
+    state.dev_ids = {}
+    state.ev_tasks = {}
+    state.net_prev = {}
+    state.counters = {"registered": 0, "deregistered": 0, "stuck_resolved": 0, "reconciles": 0}
+    state.metrics = {}
     if not settings.auth_token:
         log.warning("MODELSYNC_AUTH_TOKEN unset — orchestrator API is UNAUTHENTICATED")
     state.loop_task = asyncio.create_task(_background_loop())
+    # GPUStack SSE watches: worker/model-file create+delete wake the reconcile
+    # loop immediately (the interval remains as fallback heartbeat).
+    state.watch_tasks = [
+        asyncio.create_task(_gpustack_watch_loop("workers")),
+        asyncio.create_task(_gpustack_watch_loop("model-files")),
+    ]
     yield
+    for _ip, t in state.ev_tasks.values():
+        t.cancel()
+    for t in state.watch_tasks:
+        t.cancel()
     state.loop_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await state.loop_task  # let it finish so we don't close http under it
+    for _ip, t in list(state.ev_tasks.values()):
+        with contextlib.suppress(asyncio.CancelledError):
+            await t
+    for t in state.watch_tasks:
+        with contextlib.suppress(asyncio.CancelledError):
+            await t
     await state.http.aclose()
 
 
@@ -229,10 +276,13 @@ async def _reconcile_core(
     involved |= state.members
     managed = [w for w in workers if w.id in involved and w.syncable]
     unreachable, warnings = await reconcile(
-        plan, managed, client_for, settings.syncthing_data_port, have
+        plan, managed, client_for, settings.syncthing_data_port, have,
+        settings.sync_max_send_kbps, settings.sync_max_recv_kbps,
+        dev_out=state.dev_ids,
     )
+    _ensure_event_watchers(workers, {w.id for w in managed})
 
-    rows = await collect_status(plan, workers, client_for)
+    rows = await collect_status(plan, workers, client_for, state.dev_ids)
     done = {(r.path, r.worker_id) for r in rows if r.complete}  # both APIs agree
 
     # Resolve at most ONE stuck path per pass. A folder settled (idle/error) yet
@@ -266,6 +316,7 @@ async def _reconcile_core(
             log.warning("stuck %s: no clean verified copy to resolve from; manual check", stuck.path)
         else:
             log.info("resolving stuck %s from clean copy %s", stuck.path, by_id[auth].name)
+            state.counters["stuck_resolved"] += 1
             with contextlib.suppress(httpx.HTTPError):
                 # override: the clean copy's version becomes the cluster truth.
                 await client_for(by_id[auth]).override(fid)
@@ -331,12 +382,53 @@ async def _reconcile_core(
         state.members = keep_members
         save_members(state.members)
 
+    await _sync_pins(workers, have)
+
+    state.counters["registered"] += len(registered)
+    state.counters["deregistered"] += len(deregistered)
+    state.counters["reconciles"] += 1
+    state.metrics = {
+        "rows": len(rows),
+        "rows_complete": sum(1 for r in rows if r.complete),
+        "rows_clean": sum(1 for r in rows if r.clean),
+        "rows_errors": sum(1 for r in rows if r.errors > 0),
+        "rows_unreachable": sum(1 for r in rows if r.state == "unreachable"),
+        "need_bytes": sum(r.need_bytes for r in rows),
+        "plan_models": len(plan),
+        "unreachable_nodes": len(unreachable),
+    }
+
     return {
         "unreachable": unreachable,
         "warnings": warnings,
         "registered": registered,
         "deregistered": deregistered,
     }
+
+
+async def _sync_pins(workers: list[Worker], have: dict[str, set[int]]) -> None:
+    """Keep pin labels in step with reality: every READY holder of a pinned
+    model's folder carries the pin label; nodes that lost the copy lose it.
+    GPUStack's scheduler then places instances via Model.worker_selector."""
+    if not state.pins:
+        return
+    by_id = {w.id: w for w in workers}
+    for pin in state.pins.values():
+        path, label = pin["path"], pin["label"]
+        holders = have.get(path, set())
+        for w in by_id.values():
+            has = label in w.labels
+            want = w.id in holders
+            if has == want:
+                continue
+            labels = {k: v for k, v in w.labels.items() if k != label}
+            if want:
+                labels[label] = "true"
+            try:
+                await state.gpustack.set_worker_labels(w.id, labels)
+                w.labels = labels  # keep the in-memory view consistent this pass
+            except httpx.HTTPError as e:
+                log.warning("pin label update for worker %s failed: %s", w.id, e)
 
 
 async def reconcile_all(plan: dict[str, set[int]] | None = None) -> dict[str, Any]:
@@ -368,12 +460,68 @@ def _prune_plan(plan: dict[str, set[int]], known_paths: set[str]) -> dict[str, s
 async def _background_loop() -> None:
     while True:
         try:
-            await asyncio.sleep(max(1, settings.reconcile_interval))  # floor: never spin
+            # Wait for either an event wake (Syncthing completion, GPUStack
+            # create/delete) or the fallback interval — whichever comes first.
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(state.wake.wait(), timeout=max(1, settings.reconcile_interval))
+            state.wake.clear()
+            await asyncio.sleep(1)  # debounce an event burst into one pass
             await reconcile_all()
         except asyncio.CancelledError:
             raise
         except Exception as e:  # never let the loop die
             log.warning("reconcile loop error: %s", e)
+
+
+async def _gpustack_watch_loop(resource: str) -> None:
+    """Wake the reconcile loop on GPUStack create/delete events. Update events
+    (status heartbeats) are ignored — they'd wake every few seconds for nothing."""
+    while True:
+        try:
+            async for line in state.gpustack.watch(resource):
+                up = line.upper()
+                if b"CREATE" in up or b"DELETE" in up:
+                    state.wake.set()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            await asyncio.sleep(10)  # stream died; reconnect
+
+
+async def _syncthing_event_loop(w: Worker) -> None:
+    """Long-poll one node's Syncthing events. A folder reaching 100% completion
+    (or reporting errors) wakes the reconcile loop, so registration happens
+    seconds after a sync finishes instead of at the next interval tick."""
+    c = client_for(w)
+    since = 0
+    while True:
+        try:
+            evs = await c.events(since, "FolderCompletion,FolderErrors")
+            for ev in evs:
+                eid = ev.get("id")
+                if isinstance(eid, int):
+                    since = max(since, eid)
+                data = ev.get("data") or {}
+                etype = ev.get("type")
+                if etype == "FolderErrors" or (etype == "FolderCompletion" and data.get("completion") == 100):
+                    state.wake.set()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            await asyncio.sleep(10)
+
+
+def _ensure_event_watchers(workers: list[Worker], managed_ids: set[int]) -> None:
+    """One event-watcher task per managed reachable worker; recreated when the
+    node's IP changes, cancelled when the node leaves the managed set."""
+    want = {w.id: w for w in workers if w.id in managed_ids and w.syncable}
+    for wid, (ip, task) in list(state.ev_tasks.items()):
+        if wid not in want or want[wid].ip != ip:
+            task.cancel()
+            del state.ev_tasks[wid]
+    for wid, w in want.items():
+        if wid not in state.ev_tasks:
+            state.ev_tasks[wid] = (w.ip, asyncio.create_task(_syncthing_event_loop(w)))
 
 
 # ---- API ------------------------------------------------------------------
@@ -645,6 +793,142 @@ async def suggest() -> list[dict[str, Any]]:
         if mi.local_dir and mi.worker_id is not None and mi.worker_id not in plan.get(mi.local_dir, set()):
             out.append({"path": mi.local_dir, "worker_id": mi.worker_id})
     return out
+
+
+@app.get("/net", dependencies=[Depends(require_auth)])
+async def net() -> dict[int, dict[str, Any]]:
+    """Per managed node: connected peer count + real in/out rates, computed from
+    Syncthing's connection byte totals between polls (not a client-side guess)."""
+    workers = await state.gpustack.workers()
+    managed = [w for w in workers if w.id in state.members and w.syncable]
+    out: dict[int, dict[str, Any]] = {}
+    now = asyncio.get_running_loop().time()
+    for w in managed:
+        try:
+            conns = (await client_for(w).connections()).get("connections") or {}
+        except httpx.HTTPError:
+            continue
+        connected = in_tot = out_tot = 0
+        for c in conns.values():
+            if not isinstance(c, dict):
+                continue
+            if c.get("connected"):
+                connected += 1
+            in_tot += int(c.get("inBytesTotal") or 0)
+            out_tot += int(c.get("outBytesTotal") or 0)
+        prev = state.net_prev.get(w.id)
+        in_bps = out_bps = 0.0
+        if prev and now > prev[0]:
+            dt = now - prev[0]
+            in_bps = max(0.0, (in_tot - prev[1]) / dt)
+            out_bps = max(0.0, (out_tot - prev[2]) / dt)
+        state.net_prev[w.id] = (now, in_tot, out_tot)
+        out[w.id] = {"connected": connected, "in_bps": in_bps, "out_bps": out_bps}
+    return out
+
+
+@app.get("/metrics", dependencies=[Depends(require_auth)])
+async def metrics() -> Response:
+    """Prometheus text exposition of the last reconcile snapshot + counters."""
+    lines = []
+    for k, v in state.metrics.items():
+        lines.append(f"# TYPE modelsync_{k} gauge")
+        lines.append(f"modelsync_{k} {v}")
+    for k, v in state.counters.items():
+        lines.append(f"# TYPE modelsync_{k}_total counter")
+        lines.append(f"modelsync_{k}_total {v}")
+    return Response("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
+
+
+class PinIn(BaseModel):
+    path: str
+    model_id: int
+
+
+@app.post("/pin", dependencies=[Depends(require_auth)])
+async def pin(body: PinIn) -> dict[str, Any]:
+    """Schedule-aware placement: label every node holding this folder and point
+    the Model's worker_selector at that label, so GPUStack schedules instances
+    onto nodes that already have the weights. Reconcile keeps labels current."""
+    label = f"modelsync-{folder_id(body.path)[-8:]}"
+    async with state.lock:
+        folders = await state.gpustack.model_folders()
+        have = {f.path: set(f.current_nodes) for f in folders}
+        if body.path not in have:
+            return {"ok": False, "error": "unknown model path"}
+        m = await state.gpustack.get_model(body.model_id)
+        if m is None:
+            return {"ok": False, "error": "model not found"}
+        try:
+            await state.gpustack.set_model_selector(body.model_id, {label: "true"})
+        except httpx.HTTPError as e:
+            return {"ok": False, "error": f"selector update failed: {e}"}
+        state.pins[str(body.model_id)] = {
+            "path": body.path,
+            "label": label,
+            "prev_selector": m.get("worker_selector") or {},
+        }
+        save_pins(state.pins)
+        workers = await state.gpustack.workers()
+        await _sync_pins(workers, have)
+    return {"ok": True, "label": label, "holders": sorted(have[body.path])}
+
+
+class UnpinIn(BaseModel):
+    model_id: int
+
+
+@app.post("/unpin", dependencies=[Depends(require_auth)])
+async def unpin(body: UnpinIn) -> dict[str, Any]:
+    """Restore the Model's original worker_selector; pin labels stop updating."""
+    async with state.lock:
+        pin_rec = state.pins.pop(str(body.model_id), None)
+        if pin_rec is None:
+            return {"ok": False, "error": "model not pinned"}
+        save_pins(state.pins)
+        try:
+            await state.gpustack.set_model_selector(
+                body.model_id, pin_rec.get("prev_selector") or {}
+            )
+        except httpx.HTTPError as e:
+            return {"ok": False, "error": f"selector restore failed: {e} (pin removed)"}
+    return {"ok": True}
+
+
+class PurgeIn(BaseModel):
+    path: str
+    worker_id: int
+    delete_files: bool = False
+
+
+@app.post("/purge", dependencies=[Depends(require_auth)])
+async def purge(body: PurgeIn) -> dict[str, Any]:
+    """Reclaim a node's copy: unshare (drop from plan), deregister, and with
+    delete_files=True have GPUStack delete the bytes on disk. Refuses while a
+    model instance is running from that copy."""
+    actions: list[str] = []
+    async with state.lock:
+        for mi in await state.gpustack.model_instances():
+            if mi.local_dir == body.path and mi.worker_id == body.worker_id:
+                return {"ok": False, "error": "a model instance is running from this copy"}
+        if body.worker_id in state.plan.get(body.path, set()):
+            state.plan[body.path] = state.plan[body.path] - {body.worker_id}
+            if not state.plan[body.path]:
+                del state.plan[body.path]
+            save_plan(state.plan)
+            actions.append("removed from plan")
+        # unshare + deregister our registration (if any) happens here
+        await _reconcile_core(state.plan)
+        mid = await state.gpustack.find_model_file(body.path, body.worker_id)
+        if mid is None:
+            actions.append("no GPUStack model-file record on that node")
+        else:
+            try:
+                await state.gpustack.delete_model_file(mid, cleanup=body.delete_files)
+                actions.append("deleted record + files" if body.delete_files else "deleted record (files kept)")
+            except httpx.HTTPError as e:
+                return {"ok": False, "error": f"delete failed: {e}", "actions": actions}
+    return {"ok": True, "actions": actions}
 
 
 @app.get("/events", dependencies=[Depends(require_auth_query)])

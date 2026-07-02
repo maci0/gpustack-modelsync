@@ -1,5 +1,7 @@
 """Reconcile is the non-trivial logic: source choice, revert-safety, GC."""
 
+import httpx
+
 from modelsync.gpustack import Worker
 from modelsync.reconcile import choose_source, folder_id, reconcile
 
@@ -22,8 +24,14 @@ class FakeSync:
         self.reverted: list[str] = []
         self.overridden: list[str] = []
 
-    async def enforce_local_only(self):
+    async def enforce_local_only(self, *a):
         self.local_only += 1
+
+    async def set_ignores(self, fid, patterns=None):
+        self.ignores = getattr(self, "ignores", set()) | {fid}
+
+    async def remote_completion(self, fid, dev):
+        raise httpx.HTTPError("down")
 
     async def my_id(self):
         return self.my

@@ -30,8 +30,14 @@ class Settings(BaseSettings):
     register_in_gpustack: bool = True
 
     # Background reconcile interval (seconds): re-wire shares, register finished
-    # syncs, deregister removed ones.
+    # syncs, deregister removed ones. Syncthing/GPUStack events additionally wake
+    # the loop immediately, so this is the fallback cadence, not the latency.
     reconcile_interval: int = 15
+
+    # Cap Syncthing transfer rates on every node (KiB/s, 0 = unlimited) so a big
+    # model sync can't saturate the LAN while nodes are serving inference.
+    sync_max_send_kbps: int = 0
+    sync_max_recv_kbps: int = 0
 
     # Where plan.json + registry.json live (mount a volume here in containers
     # so the plan and our GPUStack registrations survive restarts).
