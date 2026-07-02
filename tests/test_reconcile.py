@@ -10,12 +10,13 @@ class FakeSync:
     """Records calls the reconciler makes to one node. `compl`/`diverged` drive
     folder_status so we can exercise source-choice and revert-safety."""
 
-    def __init__(self, my, preset=(), compl=100.0, diverged=0, need=0, fail_status=False):
+    def __init__(self, my, preset=(), compl=100.0, diverged=0, need=0, fail_status=False, local=None):
         self.my = my
         self.compl = compl
         self.diverged = diverged
         self.need = need
         self.fail_status = fail_status
+        self.local = local
         self.local_only = 0
         self.devices: list[str] = []
         self.folders: dict[str, list[str]] = {f: [] for f in preset}
@@ -58,7 +59,8 @@ class FakeSync:
         g = 1 if self.compl > 0 else 0
         return {"completion": self.compl, "complete": self.compl >= 100 and self.need == 0,
                 "state": "idle", "need_bytes": self.need, "global_bytes": g,
-                "local_bytes": g, "errors": 0, "receive_only_changed": self.diverged}
+                "local_bytes": self.local if self.local is not None else g,
+                "errors": 0, "receive_only_changed": self.diverged}
 
     async def revert(self, fid):
         self.reverted.append(fid)
@@ -140,14 +142,25 @@ async def test_diverged_replica_reverted_only_when_not_more_complete():
     assert fakes[2].reverted == []
 
 
-async def test_complete_replica_never_reverted():
-    # both nodes already hold the model (replica complete); a divergence must NOT
-    # trigger a revert — that would destroy a good independently-present copy.
+async def test_complete_replica_with_different_content_never_reverted():
+    # replica complete but its bytes DIFFER from global (local != global): reverting
+    # could destroy a good independently-present copy -> never revert.
+    path = "/c/m"
+    workers = [W(1), W(2)]
+    fakes = {1: FakeSync("DEV1", compl=100), 2: FakeSync("DEV2", compl=100, diverged=999, local=2)}
+    await reconcile({path: {1, 2}}, workers, make(fakes), have={path: {1, 2}})
+    assert fakes[2].reverted == []
+
+
+async def test_complete_identical_replica_gets_flag_clear_revert():
+    # post-index-reset artifact: replica complete, byte-identical (local==global),
+    # but marked diverged. Revert is a safe flag-clear here and must fire, else the
+    # copy is 'complete but never clean' forever.
     path = "/c/m"
     workers = [W(1), W(2)]
     fakes = {1: FakeSync("DEV1", compl=100), 2: FakeSync("DEV2", compl=100, diverged=999)}
     await reconcile({path: {1, 2}}, workers, make(fakes), have={path: {1, 2}})
-    assert fakes[2].reverted == []
+    assert fakes[2].reverted == [folder_id(path)]
 
 
 async def test_unconfirmed_source_never_reverts():
