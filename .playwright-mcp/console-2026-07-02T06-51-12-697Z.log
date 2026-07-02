@@ -17,3 +17,4 @@
 [ 6471069ms] [ERROR] Failed to load resource: net::ERR_INCOMPLETE_CHUNKED_ENCODING @ http://192.168.0.77:8585/events:0
 [ 6472084ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://192.168.0.77:8585/status:0
 [ 6695735ms] [ERROR] Failed to load resource: net::ERR_INCOMPLETE_CHUNKED_ENCODING @ http://192.168.0.77:8585/events:0
+[ 7189768ms] [ERROR] Failed to load resource: net::ERR_INCOMPLETE_CHUNKED_ENCODING @ http://192.168.0.77:8585/events:0

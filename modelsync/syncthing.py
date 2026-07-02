@@ -69,10 +69,17 @@ class SyncthingClient:
         await self._req("PATCH", "/rest/config/options", json=opts)
 
     async def set_ignores(self, folder_id: str, patterns: list[str] | None = None) -> None:
-        """Install ignore patterns so partial/temp files never replicate."""
+        """Install ignore patterns so partial/temp files never replicate.
+        Idempotent: writing .stignore RESTARTS the folder (aborting any in-flight
+        pull/rebuild), so an unconditional write every reconcile pass would keep
+        large transfers restarting forever. Only write on actual change."""
+        want = patterns if patterns is not None else IGNORE_PATTERNS
+        r = await self._req("GET", "/rest/db/ignores", params={"folder": folder_id})
+        cur = r.json().get("ignore") if isinstance(r.json(), dict) else None
+        if cur == want:
+            return
         await self._req(
-            "POST", "/rest/db/ignores", params={"folder": folder_id},
-            json={"ignore": patterns if patterns is not None else IGNORE_PATTERNS},
+            "POST", "/rest/db/ignores", params={"folder": folder_id}, json={"ignore": want}
         )
 
     async def connections(self) -> dict[str, Any]:
