@@ -19,7 +19,7 @@ from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from .config import settings
-from .gpustack import GPUStackClient, ModelFolder, Worker, free_for_path
+from .gpustack import GPUStackClient, ModelFolder, Worker, under_roots, free_for_path
 from .reconcile import choose_source, collect_status, folder_id, reconcile
 from .syncthing import SyncthingClient
 from .web import PAGE, SCRIPT, USERSCRIPT
@@ -160,6 +160,15 @@ _EXEMPT_NETS = [
     if c.strip()
 ]
 
+# Cache roots gate: any path we stand up as a Syncthing share OR delete on disk
+# must be strictly under one of these, so a compromised GPUStack can't point us
+# at /etc or an arbitrary directory. Empty = allow (roots not configured).
+_CACHE_ROOTS = [r.strip().rstrip("/") for r in settings.cache_roots.split(",") if r.strip()]
+
+
+def _path_allowed(path: str) -> bool:
+    return not _CACHE_ROOTS or under_roots(path, _CACHE_ROOTS)
+
 
 def _peer_exempt(request: Request) -> bool:
     """True if the TCP peer's IP is in an auth-exempt CIDR. Uses the socket peer
@@ -170,6 +179,10 @@ def _peer_exempt(request: Request) -> bool:
         addr = ipaddress.ip_address(host)
     except ValueError:
         return False
+    # A dual-stack socket reports loopback as ::ffff:127.0.0.1 — unwrap so it
+    # matches the IPv4 exempt CIDRs instead of silently demanding a token.
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
+        addr = addr.ipv4_mapped
     return any(addr in n for n in _EXEMPT_NETS)
 
 
@@ -239,6 +252,14 @@ async def lifespan(_app: FastAPI):
     state.metrics = {}
     if not settings.auth_token:
         log.warning("MODELSYNC_AUTH_TOKEN unset — orchestrator API is UNAUTHENTICATED")
+    # Cleartext-credential warnings: the GPUStack bearer token and the Syncthing
+    # API key travel in plaintext over http on a routable network.
+    gp = urlparse(settings.gpustack_url)
+    if gp.scheme == "http" and (gp.hostname or "") not in ("localhost", "127.0.0.1", "::1"):
+        log.warning("GPUSTACK_URL is http:// to a remote host — bearer token sent in cleartext; use https")
+    if not settings.syncthing_api_keys:
+        log.warning("single shared SYNCTHING_API_KEY on all nodes — set SYNCTHING_API_KEYS "
+                    "(ip=key,...) so one compromised node can't reach every peer")
     state.loop_task = asyncio.create_task(_background_loop())
     # GPUStack SSE watches: worker/model-file create+delete wake the reconcile
     # loop immediately (the interval remains as fallback heartbeat).
@@ -311,14 +332,15 @@ async def _reconcile_core(
         and r.state not in working and r.worker_id in by_id
         and r.path not in state.resetting  # don't fight an in-flight /reset
     ]
-    # Track consecutive stuck passes per (path, node); anything that started
-    # moving (or completed) resets its counter. Drives the heavy-reset escalation.
+    # Forget counters for rows that started moving / completed (only currently
+    # stuck rows carry a count). Incrementing is deferred to below and only
+    # happens when a clean source actually existed to attempt a gentle resolve —
+    # otherwise a run of source-less passes would escalate straight to heavy-reset
+    # the moment a source appears, skipping the gentle revert.
     stuck_keys = {(r.path, r.worker_id) for r in stuck_rows}
     for key in list(state.stuck_seen):
         if key not in stuck_keys:
             del state.stuck_seen[key]
-    for key in stuck_keys:
-        state.stuck_seen[key] = state.stuck_seen.get(key, 0) + 1
     stuck = stuck_rows[0] if stuck_rows else None
     if stuck:
         fid = folder_id(stuck.path)
@@ -335,6 +357,11 @@ async def _reconcile_core(
         else:
             log.info("resolving stuck %s from clean copy %s", stuck.path, by_id[auth].name)
             state.counters["stuck_resolved"] += 1
+            # count this pass now that a real resolve is happening (drives escalation)
+            for r in stuck_rows:
+                if r.path == stuck.path:
+                    key = (r.path, r.worker_id)
+                    state.stuck_seen[key] = state.stuck_seen.get(key, 0) + 1
             with contextlib.suppress(httpx.HTTPError):
                 # override: the clean copy's version becomes the cluster truth.
                 await client_for(by_id[auth]).override(fid)
@@ -441,6 +468,13 @@ async def _sync_pins(workers: list[Worker], have: dict[str, set[int]]) -> None:
     GPUStack's scheduler then places instances via Model.worker_selector."""
     if not state.pins:
         return
+    # Drop pins whose folder no longer exists anywhere (model fully removed): the
+    # pin can never label a holder again, so stop tracking + writing for it.
+    dead = [mid for mid, pin in state.pins.items() if pin["path"] not in have]
+    if dead:
+        for mid in dead:
+            del state.pins[mid]
+        save_pins(state.pins)
     by_id = {w.id: w for w in workers}
     for pin in state.pins.values():
         path, label = pin["path"], pin["label"]
@@ -857,6 +891,10 @@ async def net() -> dict[int, dict[str, Any]]:
             out_bps = max(0.0, (out_tot - prev[2]) / dt)
         state.net_prev[w.id] = (now, in_tot, out_tot)
         out[w.id] = {"connected": connected, "in_bps": in_bps, "out_bps": out_bps}
+    # prune counters for workers that no longer exist (bound growth under churn)
+    live = {w.id for w in workers}
+    for wid in [k for k in state.net_prev if k not in live]:
+        del state.net_prev[wid]
     return out
 
 
@@ -883,6 +921,8 @@ async def pin(body: PinIn) -> dict[str, Any]:
     """Schedule-aware placement: label every node holding this folder and point
     the Model's worker_selector at that label, so GPUStack schedules instances
     onto nodes that already have the weights. Reconcile keeps labels current."""
+    if not _path_allowed(body.path):
+        return {"ok": False, "error": "path outside configured cache roots"}
     label = f"modelsync-{folder_id(body.path)[-8:]}"
     async with state.lock:
         folders = await state.gpustack.model_folders()
@@ -925,6 +965,14 @@ async def unpin(body: UnpinIn) -> dict[str, Any]:
             )
         except httpx.HTTPError as e:
             return {"ok": False, "error": f"selector restore failed: {e} (pin removed)"}
+        # Strip the now-orphaned pin label off every worker that carries it.
+        label = pin_rec.get("label")
+        for w in await state.gpustack.workers():
+            if label in w.labels:
+                with contextlib.suppress(httpx.HTTPError):
+                    await state.gpustack.set_worker_labels(
+                        w.id, {k: v for k, v in w.labels.items() if k != label}
+                    )
     return {"ok": True}
 
 
@@ -939,30 +987,24 @@ async def purge(body: PurgeIn) -> dict[str, Any]:
     """Reclaim a node's copy: unshare (drop from plan), deregister, and with
     delete_files=True have GPUStack delete the bytes on disk. Refuses while a
     model instance is running from that copy."""
+    if not _path_allowed(body.path):
+        return {"ok": False, "error": "path outside configured cache roots"}
     actions: list[str] = []
     async with state.lock:
+        # Do the DESTRUCTIVE steps first and mutate the plan only after they
+        # succeed. If we abort (instance running) the plan is untouched, so we
+        # never leave "removed from plan but files/record still there" (which the
+        # background loop would then unshare, orphaning the GPUStack record).
         for mi in await state.gpustack.model_instances():
             if mi.local_dir == body.path and mi.worker_id == body.worker_id:
                 return {"ok": False, "error": "a model instance is running from this copy"}
-        if body.worker_id in state.plan.get(body.path, set()):
-            state.plan[body.path] = state.plan[body.path] - {body.worker_id}
-            if not state.plan[body.path]:
-                del state.plan[body.path]
-            save_plan(state.plan)
-            actions.append("removed from plan")
-        # Find + delete the model-file BEFORE reconciling: reconcile would
-        # deregister a copy WE created (record gone, bytes kept), and then a
-        # cleanup delete would have nothing to act on — files left forever.
+        # Delete the model-file BEFORE unshare-reconcile: reconcile would
+        # deregister a copy WE created (record gone, bytes kept), leaving a
+        # cleanup delete nothing to act on — files stranded forever.
         mid = await state.gpustack.find_model_file(body.path, body.worker_id)
         if mid is None:
             actions.append("no GPUStack model-file record on that node")
         else:
-            # Re-check instances right before the destructive step: GPUStack's
-            # scheduler is external and could have placed one since the first check.
-            for mi in await state.gpustack.model_instances():
-                if mi.local_dir == body.path and mi.worker_id == body.worker_id:
-                    return {"ok": False, "error": "a model instance was just scheduled from this copy",
-                            "actions": actions}
             try:
                 await state.gpustack.delete_model_file(mid, cleanup=body.delete_files)
                 actions.append("deleted record + files" if body.delete_files else "deleted record (files kept)")
@@ -971,6 +1013,13 @@ async def purge(body: PurgeIn) -> dict[str, Any]:
             k = _key(body.path, body.worker_id)
             if state.registry.pop(k, None) is not None:  # it was ours; already deleted above
                 save_registry(state.registry)
+        # Destructive part done -> now drop from plan + unshare the folder.
+        if body.worker_id in state.plan.get(body.path, set()):
+            state.plan[body.path] = state.plan[body.path] - {body.worker_id}
+            if not state.plan[body.path]:
+                del state.plan[body.path]
+            save_plan(state.plan)
+            actions.append("removed from plan")
         await _reconcile_core(state.plan)  # unshare the Syncthing folder (GC)
     return {"ok": True, "actions": actions}
 

@@ -125,10 +125,13 @@ async def reconcile(
         if src is None:
             warnings.append(f"{path}: no node holds it (no source); skipped")
             continue
-        # Only ever revert toward a CONFIRMED holder whose completion we actually
-        # read. Unknown completion -> 0.0 so the guard can never wrongly fire.
+        # Reverting a replica destroys its local divergence in favour of the
+        # source, so the source must be a VERIFIED-CLEAN full copy (complete,
+        # idle, no errors, no divergence, local==global) AND GPUStack-confirmed —
+        # never propagate a source that is itself partial or diverged. The
+        # override branch (below) handles the source-is-diverged case separately.
         src_confirmed = src in confirmed
-        src_compl = (status[src] or {}).get("completion", 0.0)
+        src_clean = src_confirmed and _is_clean(status.get(src))
 
         for wid in targets:
             desired.setdefault(wid, {})[fid] = path
@@ -149,33 +152,28 @@ async def reconcile(
                     # Override to make the source authoritative; replicas converge.
                     if st and st["state"] == "idle" and st["need_bytes"] > 0:
                         await c.override(fid)
-                if ftype == "receiveonly" and src_confirmed:
+                if ftype == "receiveonly" and src_clean:
                     st = status.get(wid) or await c.folder_status(fid)
-                    # Revert a diverged replica ONLY if it is incomplete and not
-                    # more complete than the confirmed source. A replica that
-                    # already holds the full model (complete) is never reverted —
-                    # that would destroy a good, independently-present copy.
-                    if (
-                        src_compl > 0  # never wipe toward an unknown/empty source
-                        and st["global_bytes"] > 0  # replica state is known
+                    # Source is verified-clean (100%). Revert a replica in two
+                    # cases, both safe because the clean source owns the content:
+                    #  (a) incomplete + diverged: drop the partial local divergence
+                    #      and pull the source's version.
+                    #  (b) complete but diverged (external writes: GPUStack verify
+                    #      rewrites, upstream HF drift, index-reset misattribution)
+                    #      — identical blocks re-mark synced (no transfer), differing
+                    #      files take the source's version.
+                    incomplete_diverged = (
+                        st["global_bytes"] > 0
                         and not st["complete"]
                         and st["receive_only_changed"] > 0
-                        and st["completion"] < src_compl  # strictly less complete
-                    ) or (
-                        # Converge a COMPLETE diverged replica toward a 100%
-                        # confirmed source. Divergence here = external local
-                        # writes (GPUStack re-verifying rewrites files; upstream
-                        # HF revisions drift) or index-reset misattribution;
-                        # receiveonly semantics say the source owns the content.
-                        # Identical blocks are just re-marked synced (no
-                        # transfer); differing files are replaced by the source's
-                        # version. Never fires toward an incomplete or
-                        # unconfirmed source (guards above/below).
+                        and st["completion"] < 100
+                    )
+                    complete_diverged = (
                         st["complete"]
                         and st["receive_only_changed"] > 0
                         and st["need_bytes"] == 0
-                        and src_compl >= 100
-                    ):
+                    )
+                    if incomplete_diverged or complete_diverged:
                         await c.revert(fid)
             except _NET_ERRORS:
                 unreachable.add(wid)

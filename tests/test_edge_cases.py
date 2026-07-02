@@ -9,7 +9,7 @@ from modelsync.gpustack import (
     _maintenance_on,
     _max_free,
     _model_dir,
-    _under_roots,
+    under_roots,
     free_for_path,
 )
 from modelsync.reconcile import choose_source, _is_clean, collect_status, folder_id
@@ -72,12 +72,12 @@ def test_7_is_clean_rejects_poison():
     assert not _is_clean(st(global_bytes=0, local_bytes=0))  # unknown, not clean
 
 
-# 8. _under_roots: equal to root is NOT under; sibling-prefix is NOT under
-def test_8_under_roots_boundaries():
+# 8. under_roots: equal to root is NOT under; sibling-prefix is NOT under
+def test_8under_roots_boundaries():
     roots = ["/var/lib/gpustack"]
-    assert not _under_roots("/var/lib/gpustack", roots)          # equal
-    assert _under_roots("/var/lib/gpustack/m", roots)            # under
-    assert not _under_roots("/var/lib/gpustack-evil/m", roots)   # sibling prefix
+    assert not under_roots("/var/lib/gpustack", roots)          # equal
+    assert under_roots("/var/lib/gpustack/m", roots)            # under
+    assert not under_roots("/var/lib/gpustack-evil/m", roots)   # sibling prefix
 
 
 # 9. free_for_path: exact mount-point match

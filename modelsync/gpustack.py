@@ -186,7 +186,7 @@ class GPUStackClient:
             path = _model_dir(mf)
             if not path:
                 continue
-            if self._roots and not _under_roots(path, self._roots):
+            if self._roots and not under_roots(path, self._roots):
                 log.warning("model path %s outside cache roots, ignoring", path)
                 continue
             nodes.setdefault(path, set())
@@ -437,7 +437,7 @@ def _gpu_summary(status: Any) -> dict[str, Any]:
     }
 
 
-def _under_roots(path: str, roots: list[str]) -> bool:
+def under_roots(path: str, roots: list[str]) -> bool:
     # strictly UNDER a root (depth >= 1), never equal to a root — sharing a whole
     # cache root as one folder would let a revert/override wipe sibling models.
     p = os.path.normpath(path)

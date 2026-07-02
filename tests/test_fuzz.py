@@ -16,7 +16,7 @@ from modelsync.gpustack import (
     _max_free,
     _model_dir,
     _mounts,
-    _under_roots,
+    under_roots,
     free_for_path,
 )
 from modelsync.reconcile import folder_id
@@ -93,8 +93,8 @@ def test_folder_id_always_valid(s):
 
 @settings(max_examples=300)
 @given(st.text(), st.lists(st.text(), max_size=4))
-def test_under_roots_never_crashes(path, roots):
-    assert isinstance(_under_roots(path, roots), bool)
+def testunder_roots_never_crashes(path, roots):
+    assert isinstance(under_roots(path, roots), bool)
 
 
 @settings(max_examples=300)

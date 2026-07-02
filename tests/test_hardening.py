@@ -23,18 +23,18 @@ from modelsync.gpustack import (
     ModelFolder,
     Worker,
     _instance_dir,
-    _under_roots,
+    under_roots,
 )
 
 ROOTS = ["/var/lib/gpustack"]
 
 
-def test_under_roots_rejects_traversal_and_root_itself():
-    assert _under_roots("/var/lib/gpustack/cache/m", ROOTS)
-    assert not _under_roots("/var/lib/gpustack", ROOTS)            # equal to root
-    assert not _under_roots("/var/lib/gpustack/../../etc/x", ROOTS)  # traversal
-    assert not _under_roots("/var/lib/gpustackEVIL/x", ROOTS)       # prefix confusion
-    assert not _under_roots("/etc/passwd", ROOTS)
+def testunder_roots_rejects_traversal_and_root_itself():
+    assert under_roots("/var/lib/gpustack/cache/m", ROOTS)
+    assert not under_roots("/var/lib/gpustack", ROOTS)            # equal to root
+    assert not under_roots("/var/lib/gpustack/../../etc/x", ROOTS)  # traversal
+    assert not under_roots("/var/lib/gpustackEVIL/x", ROOTS)       # prefix confusion
+    assert not under_roots("/etc/passwd", ROOTS)
 
 
 def test_check_token(monkeypatch):
@@ -120,6 +120,7 @@ def test_peer_exempt_matches_socket_ip_only():
     try:
         assert A._peer_exempt(Req("127.0.0.1"))          # loopback exempt
         assert A._peer_exempt(Req("::1"))                # v6 loopback exempt
+        assert A._peer_exempt(Req("::ffff:127.0.0.1"))   # dual-stack mapped loopback
         assert A._peer_exempt(Req("172.17.0.1"))         # docker gateway (configured)
         assert not A._peer_exempt(Req("192.168.0.50"))   # LAN client -> token required
         assert not A._peer_exempt(Req("testclient"))     # non-IP peer -> never exempt
