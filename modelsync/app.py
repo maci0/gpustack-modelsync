@@ -302,6 +302,7 @@ async def _reconcile_core(
     if folders is None:
         folders = await state.gpustack.model_folders()
     have = {f.path: set(f.current_nodes) for f in folders}
+    pend = {f.path: set(f.pending_nodes) for f in folders}
     spec = {f.path: f.spec for f in folders}
 
     involved = {wid for t in plan.values() for wid in t}
@@ -393,6 +394,10 @@ async def _reconcile_core(
             for wid in sorted(targets):  # deterministic order
                 k = _key(path, wid)
                 if (path, wid) not in done or wid in have.get(path, set()):
+                    continue
+                if wid in pend.get(path, set()):
+                    # GPUStack is already downloading its OWN record for this
+                    # (path, node) — registering now would create a duplicate.
                     continue
                 if k in state.registry or not spec.get(path):
                     continue
@@ -680,6 +685,7 @@ def _eligible(
     known = {f.path for f in folders}
     size = {f.path: f.size for f in folders}
     have = {f.path: set(f.current_nodes) for f in folders}
+    pend = {f.path: set(f.pending_nodes) for f in folders}
     out: dict[str, set[int]] = {}
     warn: list[str] = []
     for path, targets in requested.items():
@@ -694,6 +700,12 @@ def _eligible(
                 continue
             if wid in have.get(path, set()):
                 keep.add(wid)
+                continue
+            if wid in pend.get(path, set()):
+                # GPUStack's own downloader is writing this directory right now.
+                # Standing up a Syncthing share would race it (two writers, revert
+                # vs download). Skip; re-apply once GPUStack finishes.
+                warn.append(f"{w.name}: GPUStack still downloading {path.rsplit('/', 1)[-1]} there — skipped, retry when done")
                 continue
             if not w.syncable:
                 warn.append(f"{w.name}: not ready/in maintenance, skipped {path}")

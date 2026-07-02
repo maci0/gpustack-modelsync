@@ -113,8 +113,9 @@ def W(i):
     return Worker(id=i, name=f"n{i}", ip=f"10.0.0.{i}", state="ready")
 
 
-def F(path, nodes=(), size=100):
+def F(path, nodes=(), size=100, pending=()):
     return ModelFolder(path=path, label=path, size=size, current_nodes=list(nodes),
+                       pending_nodes=list(pending),
                        spec={"source": "huggingface", "huggingface_repo_id": "r"})
 
 
@@ -133,6 +134,14 @@ async def test_does_not_register_incomplete_or_already_present(monkeypatch):
     gp = _setup(monkeypatch, complete=True)
     await A._reconcile_core({"/m": {1}}, [W(1)], [F("/m", nodes=[1])])  # already a holder
     assert gp.registered == []                # already in GPUStack -> skip
+
+
+async def test_no_register_while_gpustack_downloading_there(monkeypatch):
+    # Syncthing completed but GPUStack has its OWN in-flight download record on
+    # that node: registering would create a duplicate model-file. Must skip.
+    gp = _setup(monkeypatch, complete=True)
+    await A._reconcile_core({"/m": {1}}, [W(1)], [F("/m", nodes=[], pending=[1])])
+    assert gp.registered == []
 
 
 async def test_deregisters_removed_copy_with_id_verify(monkeypatch):

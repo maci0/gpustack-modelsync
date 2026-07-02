@@ -254,3 +254,15 @@ def test_25_eligible_branches():
 class _FakeSt:
     async def folder_status(self, fid):
         return st(need_bytes=0)
+
+
+# 28. _eligible: node GPUStack is downloading to -> skipped with warning (two-writer race)
+def test_28_eligible_skips_pending_download_node():
+    from modelsync.app import _eligible
+    from modelsync.gpustack import ModelFolder
+    workers = [W(1), W(2)]
+    folders = [ModelFolder(path="/m", label="m", size=10, current_nodes=[1],
+                           pending_nodes=[2], spec={})]
+    out, warn = _eligible({"/m": {1, 2}}, workers, folders)
+    assert out == {"/m": {1}}                            # pending node 2 dropped
+    assert any("still downloading" in w for w in warn)   # never silent
