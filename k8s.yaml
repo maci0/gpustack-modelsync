@@ -84,7 +84,7 @@ spec:
     spec:
       containers:
         - name: orchestrator
-          image: gpustack-modelsync:0.1.0
+          image: ghcr.io/maci0/gpustack-modelsync:0.1.0
           ports:
             - containerPort: 8585
           resources:

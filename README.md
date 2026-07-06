@@ -125,10 +125,16 @@ node, mounting the **same model-cache volume the GPUStack worker uses** at the
 same path. The orchestrator forces every node LAN-only at runtime, so the
 containers never phone home.
 
+A prebuilt orchestrator image is published to GHCR (built by CI on each release):
+
+```bash
+docker pull ghcr.io/maci0/gpustack-modelsync:0.1.0   # or :latest
+```
+
 ### Docker Compose (single host / per worker host)
 
 ```bash
-docker build -t gpustack-modelsync:0.1.0 .
+# uses the prebuilt image by default (or `docker compose build` to build locally)
 # .env: GPUSTACK_URL, GPUSTACK_TOKEN, SYNCTHING_API_KEY, AUTH_TOKEN (required)
 # point volumes.gpustack-cache.name at GPUStack's real cache volume (docker volume ls)
 docker compose up -d

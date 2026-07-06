@@ -10,8 +10,10 @@
 
 services:
   orchestrator:
+    # Pull the prebuilt image (`docker compose up`), or build locally (`docker
+    # compose build`) — `build:` stays so the source path keeps working.
+    image: ghcr.io/maci0/gpustack-modelsync:0.1.0
     build: .
-    image: gpustack-modelsync:0.1.0
     environment:
       MODELSYNC_GPUSTACK_URL: ${GPUSTACK_URL:-http://gpustack-server:80}
       MODELSYNC_GPUSTACK_TOKEN: ${GPUSTACK_TOKEN}
