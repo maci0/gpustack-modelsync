@@ -27,7 +27,7 @@ spec:
       nodeSelector: { gpustack.io/worker: "true" }
       containers:
         - name: syncthing
-          image: syncthing/syncthing:1
+          image: syncthing/syncthing:2
           env:
             - name: STGUIADDRESS
               value: 0.0.0.0:8384
