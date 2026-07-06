@@ -1,5 +1,9 @@
 # gpustack-modelsync
 
+[![CI](https://github.com/maci0/gpustack-modelsync/actions/workflows/ci.yml/badge.svg)](https://github.com/maci0/gpustack-modelsync/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
+
 Keep GPUStack model folders in sync across cluster nodes. Pick **which models**
 go to **which nodes** (or all), in a small web UI. Replication is done by
 [Syncthing](https://syncthing.net): full local copies, P2P, no central host, no
