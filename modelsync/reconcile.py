@@ -120,6 +120,12 @@ async def reconcile(
             except _NET_ERRORS:
                 status[wid] = None
 
+        # A planned path keeps its folders desired even when source-selection
+        # fails below — GC must never tear down wired folders (aborting in-flight
+        # transfers) on a transient blip (all statuses unreadable, empty have).
+        for wid in targets:
+            desired.setdefault(wid, {})[fid] = path
+
         confirmed = set(have.get(path, set()))
         src = choose_source(targets, confirmed, status)
         if src is None:
@@ -133,8 +139,6 @@ async def reconcile(
         src_confirmed = src in confirmed
         src_clean = src_confirmed and _is_clean(status.get(src))
 
-        for wid in targets:
-            desired.setdefault(wid, {})[fid] = path
         for wid in targets:
             peers = [o for o in targets if o != wid]
             ftype = "sendonly" if wid == src else "receiveonly"
@@ -225,7 +229,7 @@ def choose_source(
     if confirmed:
         return confirmed[0]
     best, best_c = None, 0.0
-    for t in targets:
+    for t in sorted(targets):  # sorted -> deterministic tie-break, order-independent
         c = (status.get(t) or {}).get("completion", 0.0)
         if c > best_c:
             best, best_c = t, c

@@ -56,6 +56,8 @@ def _req(host="192.168.0.50"):
 async def test_require_auth_header_vs_query(monkeypatch):
     monkeypatch.setattr(settings, "auth_token", "tok")
     await require_auth(_req(), authorization="Bearer tok", x_auth_token=None)   # bearer
+    await require_auth(_req(), authorization="bearer tok", x_auth_token=None)   # RFC 7235: scheme case-insensitive
+    await require_auth(_req(), authorization="tok", x_auth_token=None)          # raw token, no scheme
     await require_auth(_req(), authorization=None, x_auth_token="tok")          # header
     with pytest.raises(fastapi.HTTPException):
         await require_auth(_req(), authorization="Bearer bad", x_auth_token=None)
@@ -303,3 +305,100 @@ def test_per_node_syncthing_keys(monkeypatch):
     assert A.client_for(w5)._headers["X-API-Key"] == "special"   # per-node key
     assert A.client_for(w6)._headers["X-API-Key"] == "shared"    # fallback
     A._ST_KEYS.pop("10.0.0.5", None)
+
+
+async def test_register_synced_tolerates_malformed_response():
+    async def handler(request):
+        return httpx.Response(200, json=[1, 2])  # non-dict body
+
+    gp = GPUStackClient(
+        "http://x", "t", httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    assert await gp.register_synced(1, {"source": "hf"}) is None
+
+    async def handler2(request):
+        return httpx.Response(200, json={"id": "nope"})  # non-int id
+
+    gp2 = GPUStackClient(
+        "http://x", "t", httpx.AsyncClient(transport=httpx.MockTransport(handler2))
+    )
+    assert await gp2.register_synced(1, {"source": "hf"}) is None
+
+
+def test_access_log_filter_redacts_events_token():
+    import logging
+
+    rec = logging.LogRecord(
+        "uvicorn.access", logging.INFO, "", 0, '%s - "%s %s" %s',
+        ("1.2.3.4:1", "GET", "/events?token=s3kret&x=1", "200"), None,
+    )
+    assert A._RedactTokenFilter().filter(rec)
+    msg = rec.getMessage()
+    assert "s3kret" not in msg and "token=***" in msg and "x=1" in msg
+
+
+def test_load_pins_normalizes_prev_selector(tmp_path, monkeypatch):
+    f = tmp_path / "pins.json"
+    f.write_text(json.dumps({
+        "5": {"path": "/p", "label": "l", "prev_selector": "junk"},   # non-dict -> {}
+        "6": {"path": "/p", "label": "l", "prev_selector": {"z": "a"}},
+        "x": {"path": "/p", "label": "l"},                            # non-digit key dropped
+    }))
+    monkeypatch.setattr(A, "PINS_FILE", f)
+    pins = A.load_pins()
+    assert pins["5"]["prev_selector"] == {}
+    assert pins["6"]["prev_selector"] == {"z": "a"}
+    assert "x" not in pins
+
+
+def test_main_fail_closed_checks(monkeypatch):
+    # open API may only bind loopback
+    monkeypatch.setattr(settings, "auth_token", "")
+    monkeypatch.setattr(settings, "listen_host", "0.0.0.0")
+    with pytest.raises(SystemExit, match="Refusing to start"):
+        A.main()
+    # TLS files must come as a pair
+    monkeypatch.setattr(settings, "auth_token", "tok")
+    monkeypatch.setattr(settings, "ssl_certfile", "/cert.pem")
+    monkeypatch.setattr(settings, "ssl_keyfile", "")
+    with pytest.raises(SystemExit, match="BOTH"):
+        A.main()
+
+
+async def test_get_model_file_distinguishes_404_from_outage():
+    # None must mean "record gone" (404) ONLY. On any other failure the caller
+    # would forget its registry entry and leak the GPUStack record forever.
+    def gp_with(status):
+        async def handler(request):
+            return httpx.Response(status, json={"detail": "x"})
+        return GPUStackClient(
+            "http://x", "t", httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        )
+
+    assert await gp_with(404).get_model_file(7) is None       # genuinely gone
+    with pytest.raises(httpx.HTTPStatusError):
+        await gp_with(500).get_model_file(7)                  # outage propagates
+    assert await gp_with(404).get_model(7) is None
+    with pytest.raises(httpx.HTTPStatusError):
+        await gp_with(503).get_model(7)
+
+
+def _st_client(payload):
+    from modelsync.syncthing import SyncthingClient
+
+    async def handler(request):
+        return httpx.Response(200, json=payload)
+
+    return SyncthingClient("http://x", "k", httpx.AsyncClient(
+        transport=httpx.MockTransport(handler)))
+
+
+async def test_syncthing_client_parsers_degrade():
+    # connections: non-dict body -> {}
+    assert await _st_client(["junk"]).connections() == {}
+    # remote_completion: non-numeric -> 0.0; numeric -> float
+    assert await _st_client({"completion": "junk"}).remote_completion("f", "d") == 0.0
+    assert await _st_client({"completion": 55}).remote_completion("f", "d") == 55.0
+    # events: non-list -> []; poison (non-dict) entries filtered
+    assert await _st_client({"not": "list"}).events(0, "X") == []
+    assert await _st_client([{"id": 1}, "junk"]).events(0, "X") == [{"id": 1}]

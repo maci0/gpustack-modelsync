@@ -131,3 +131,57 @@ def test_purge_deletes_record_with_cleanup(client):
 
 def test_clusters_endpoint(client):
     assert client.get("/clusters").json() == [{"id": 1, "name": "test"}]
+
+
+async def test_userscript_rejects_host_injection():
+    # TestClient pins Host to "testserver", so exercise the guard directly.
+    import fastapi
+
+    from modelsync.app import userscript
+
+    class R:  # only base_url is used by the endpoint
+        base_url = "http://x';alert(1)//"
+
+    with pytest.raises(fastapi.HTTPException):
+        await userscript(R())  # quote must never reach the JS literal
+
+
+def test_userscript_fills_placeholders(client):
+    r = client.get("/userscript.js")
+    assert r.status_code == 200
+    assert "const API='http://testserver'" in r.text
+    assert "__API__" not in r.text and "__GP_ORIGIN__" not in r.text
+
+
+def test_net_tolerates_junk_counters(client):
+    class JunkSt(FakeSt):
+        async def connections(self):
+            return {"connections": {
+                "PEER1": {"connected": True, "inBytesTotal": "junk", "outBytesTotal": None},
+                "PEER2": "notadict",
+            }}
+
+    A.state.members = {1}
+    import modelsync.app as app_mod
+    orig = app_mod.client_for
+    app_mod.client_for = lambda w: JunkSt()
+    try:
+        r = client.get("/net")
+    finally:
+        app_mod.client_for = orig
+    assert r.status_code == 200
+    d = r.json()["1"]
+    assert d["connected"] == 1 and d["in_bps"] == 0.0 and d["out_bps"] == 0.0
+
+
+def test_gpustack_outage_yields_502_not_500(client):
+    import httpx
+
+    class DownGP(FakeGP):
+        async def workers(self):
+            raise httpx.ConnectError("refused")
+
+    A.state.gpustack = DownGP()
+    r = client.get("/nodes")
+    assert r.status_code == 502
+    assert "upstream error" in r.json()["detail"]

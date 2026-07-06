@@ -19,6 +19,9 @@ dev = ["pytest>=8", "pytest-asyncio>=0.23", "hypothesis>=6", "pyright>=1.1", "ru
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Pin the async fixture loop scope to the future pytest-asyncio default now, so an
+# upgrade can't silently change fixture/event-loop semantics under the suite.
+asyncio_default_fixture_loop_scope = "function"
 filterwarnings = [
     # starlette TestClient/httpx pairing deprecation; upstream, not actionable here
     "ignore:Using `httpx` with `starlette.testclient` is deprecated.*",
@@ -42,8 +45,8 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101", "S106", "ARG"]  # asserts + literal test tokens are the point
-"scripts/*" = ["S101", "S603", "S607"]  # dev harness: spawns local syncthing, asserts
+"tests/*" = ["S101", "S105", "S106", "S603", "ARG"]  # asserts, literal test tokens, node harness subprocess
+"scripts/*" = ["S101", "S603", "S607", "S106", "S324", "ARG"]  # dev harnesses: local syncthing, demo token, non-crypto hash, FastAPI route args
 
 [tool.pyright]
 include = ["modelsync"]

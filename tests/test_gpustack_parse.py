@@ -93,3 +93,64 @@ async def test_workers_parse_and_ip_filter():
     assert w.gpu_name == "GB10" and w.vram_total == 137 and w.vram_used == 4
     assert w.free_bytes == 3000 and w.mounts == [{"mount_point": "/var/lib/gpustack", "free": 3000}]
     assert w.worker_version == "v2.2.0" and w.syncable
+
+
+async def test_workers_skip_malformed_not_whole_fetch():
+    gp = GPUStackClient("http://x", "t", None)
+
+    async def fl(path, **k):
+        return [
+            {"id": 1, "ip": "10.0.0.5", "name": "ok", "state": "ready"},
+            {"id": 2, "ip": "10.0.0.6", "labels": "junk"},        # non-dict labels
+            {"id": 3, "ip": "10.0.0.7", "cluster_id": "abc"},     # non-int cluster
+        ]
+
+    gp._list = fl
+    assert [w.id for w in await gp.workers()] == [1]  # bad rows dropped, fetch survives
+
+
+async def test_model_folders_tolerate_malformed_wid_and_spec():
+    gp = GPUStackClient("http://x", "t", None)
+
+    async def fl(path, **k):
+        return [
+            {"worker_id": 1, "local_dir": "/c/m", "size": 10, "source": "hf",
+             "huggingface_repo_id": 123},                          # non-str spec value
+            {"worker_id": "abc", "local_dir": "/c/m", "size": 10}, # non-int worker id
+        ]
+
+    gp._list = fl
+    f = (await gp.model_folders())[0]
+    assert f.current_nodes == [1]                    # junk wid never becomes a holder
+    assert f.spec == {"source": "hf"}                # non-str spec value filtered
+
+
+async def test_model_instances_drop_malformed_rows():
+    gp = GPUStackClient("http://x", "t", None)
+
+    async def fl(path, **k):
+        return [
+            {"model_id": 1, "worker_id": 1, "resolved_path": "/c/m/w.gguf"},
+            {"model_id": "junk!", "worker_id": {}},               # unparseable row
+        ]
+
+    gp._list = fl
+    mis = await gp.model_instances()
+    assert len(mis) == 1 and mis[0].local_dir == "/c/m"
+
+
+async def test_model_folders_spec_from_later_record_when_first_is_bare():
+    # A record with no source fields seen FIRST must not lock in an empty spec
+    # (setdefault) — registration for the path would be silently blocked forever.
+    gp = GPUStackClient("http://x", "t", None)
+
+    async def fl(path, **k):
+        return [
+            {"worker_id": 1, "local_dir": "/c/m", "size": 10},                    # bare
+            {"worker_id": 2, "local_dir": "/c/m", "size": 10, "source": "hf",
+             "huggingface_repo_id": "org/repo"},                                  # real spec
+        ]
+
+    gp._list = fl
+    f = (await gp.model_folders())[0]
+    assert f.spec == {"source": "hf", "huggingface_repo_id": "org/repo"}

@@ -6,6 +6,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -15,7 +16,7 @@ from urllib.parse import urlparse
 import httpx
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from .config import settings
@@ -37,9 +38,17 @@ def _key(path: str, wid: int) -> str:
     return f"{wid}@{path}"
 
 
+def _num(x) -> int:
+    """Safe int for untrusted JSON: non-numeric (or bool) -> 0, never raises."""
+    return int(x) if isinstance(x, (int, float)) and not isinstance(x, bool) else 0
+
+
 def _atomic_write(path: Path, text: str) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text)
+    with open(tmp, "w") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())  # data on disk BEFORE the rename, else power loss can persist an empty file
     os.replace(tmp, path)  # rename is atomic; no torn file on crash
 
 
@@ -80,7 +89,7 @@ def load_registry() -> dict[str, int]:
     out = {}
     for k, v in raw.items():
         wid_s = k.split("@", 1)[0] if isinstance(k, str) else ""
-        if wid_s.isdigit() and isinstance(v, int) and not isinstance(v, bool):  # positive ids only
+        if wid_s.isdigit() and isinstance(v, int) and not isinstance(v, bool) and v > 0:  # positive ids only
             out[k] = v  # drop malformed keys instead of crashing later on int()
         else:
             log.warning("dropping malformed registry key %r", k)
@@ -104,7 +113,10 @@ def load_pins() -> dict[str, dict[str, Any]]:
     if not isinstance(raw, dict):
         return {}
     return {
-        k: v for k, v in raw.items()
+        # non-dict prev_selector (hand-edited file) -> {}: restore must never
+        # PUT junk as a worker_selector.
+        k: (v if isinstance(v.get("prev_selector"), dict) else {**v, "prev_selector": {}})
+        for k, v in raw.items()
         if isinstance(k, str) and k.isdigit() and isinstance(v, dict)
         and isinstance(v.get("path"), str) and isinstance(v.get("label"), str)
     }
@@ -195,6 +207,13 @@ def _check_token(tok: str) -> None:
         raise HTTPException(status_code=401, detail="unauthorized")
 
 
+def _header_token(h: str) -> str:
+    """Token from an Authorization header: strip a Bearer prefix (scheme is
+    case-insensitive per RFC 7235), else accept the raw value."""
+    scheme, _, rest = h.partition(" ")
+    return rest.strip() if scheme.lower() == "bearer" else h.strip()
+
+
 async def require_auth(
     request: Request,
     authorization: str | None = Header(None),
@@ -204,7 +223,7 @@ async def require_auth(
     the token into access/proxy logs). Trusted-local peers skip the token."""
     if _peer_exempt(request):
         return
-    _check_token((authorization or "").removeprefix("Bearer ").strip() or (x_auth_token or ""))
+    _check_token(_header_token(authorization or "") or (x_auth_token or ""))
 
 
 async def require_auth_query(
@@ -214,11 +233,12 @@ async def require_auth_query(
     token: str | None = Query(None),
 ) -> None:
     """Only for /events: EventSource can't set headers, so a query token is
-    accepted here (and ONLY here)."""
+    accepted here (and ONLY here). The value is masked out of uvicorn's access
+    log by _RedactTokenFilter, so it still never lands in logs."""
     if _peer_exempt(request):
         return
     _check_token(
-        (authorization or "").removeprefix("Bearer ").strip()
+        _header_token(authorization or "")
         or (x_auth_token or "")
         or (token or "")
     )
@@ -270,13 +290,16 @@ async def lifespan(_app: FastAPI):
         asyncio.create_task(_gpustack_watch_loop("model-files")),
     ]
     yield
-    for _ip, t in state.ev_tasks.values():
-        t.cancel()
-    for t in state.watch_tasks:
-        t.cancel()
+    # Stop the SPAWNER first: a reconcile in flight can create new event
+    # watchers (_ensure_event_watchers), so cancelling watchers before the loop
+    # is fully stopped could leave an uncancelled task that hangs the awaits below.
     state.loop_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await state.loop_task  # let it finish so we don't close http under it
+    for t in state.watch_tasks:
+        t.cancel()
+    for _ip, t in state.ev_tasks.values():
+        t.cancel()
     for _ip, t in list(state.ev_tasks.values()):
         with contextlib.suppress(asyncio.CancelledError):
             await t
@@ -287,6 +310,17 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="gpustack-modelsync", lifespan=lifespan)
+
+
+async def _upstream_error(request: Request, exc: Exception) -> JSONResponse:
+    """An unreachable/erroring GPUStack is an upstream failure, not an internal
+    bug: answer 502 with one warning line instead of a 500 + full traceback for
+    every UI poll (every few seconds during an outage)."""
+    log.warning("upstream error on %s: %s", request.url.path, exc)
+    return JSONResponse(status_code=502, content={"detail": f"upstream error: {exc}"})
+
+
+app.add_exception_handler(httpx.HTTPError, _upstream_error)
 
 
 # ---- core automation (assumes state.lock held) ----------------------------
@@ -315,6 +349,11 @@ async def _reconcile_core(
         dev_out=state.dev_ids,
     )
     _ensure_event_watchers(workers, {w.id for w in managed})
+    # prune device ids of workers GPUStack no longer reports (bound growth, like
+    # net_prev/ev_tasks); a temporarily missing worker just re-fetches next pass
+    live = {w.id for w in workers}
+    for wid in [k for k in state.dev_ids if k not in live]:
+        del state.dev_ids[wid]
 
     rows = await collect_status(plan, workers, client_for, state.dev_ids)
     done = {(r.path, r.worker_id) for r in rows if r.complete}  # both APIs agree
@@ -469,6 +508,25 @@ async def _reconcile_core(
     }
 
 
+async def _release_pin(model_id: int, pin_rec: dict[str, Any], workers: list[Worker]) -> str | None:
+    """Undo a pin's side effects: restore the model's original worker_selector,
+    then strip the pin label off every worker. Selector FIRST — if the restore
+    fails, labels stay in place so the model remains schedulable on its holders.
+    Returns an error string, or None on success."""
+    try:
+        await state.gpustack.set_model_selector(model_id, pin_rec.get("prev_selector") or {})
+    except httpx.HTTPError as e:
+        return f"selector restore failed: {e}"
+    label = pin_rec.get("label")
+    for w in workers:
+        if label in w.labels:
+            labels = {k: v for k, v in w.labels.items() if k != label}
+            with contextlib.suppress(httpx.HTTPError):
+                await state.gpustack.set_worker_labels(w.id, labels)
+                w.labels = labels  # in-memory view: later label writes this pass must not re-add it
+    return None
+
+
 async def _sync_pins(workers: list[Worker], have: dict[str, set[int]]) -> None:
     """Keep pin labels in step with reality: every READY holder of a pinned
     model's folder carries the pin label; nodes that lost the copy lose it.
@@ -477,12 +535,30 @@ async def _sync_pins(workers: list[Worker], have: dict[str, set[int]]) -> None:
         return
     # Drop pins whose folder no longer exists anywhere (model fully removed): the
     # pin can never label a holder again, so stop tracking + writing for it.
+    # Restore the model's original selector on the way out — otherwise it would
+    # keep pointing at a label nobody maintains, with no /unpin left to fix it.
     # Safety: an EMPTY have is treated as a suspicious false-empty GPUStack
     # response (same as _prune_plan) — never nuke every pin on one bad read.
     dead = [] if not have else [mid for mid, pin in state.pins.items() if pin["path"] not in have]
-    if dead:
-        for mid in dead:
-            del state.pins[mid]
+    changed = False
+    for mid in dead:
+        err = await _release_pin(int(mid), state.pins[mid], workers)
+        if err is not None:
+            # Restore failed. Drop the pin ONLY if the Model is genuinely gone
+            # (nothing left to restore); a transient GPUStack error must keep the
+            # pin so the next pass retries — else a blip permanently loses it and
+            # orphans the selector with no /unpin left to fix it.
+            try:
+                if await state.gpustack.get_model(int(mid)) is not None:
+                    log.warning("pin %s folder gone but restore failed; will retry: %s", mid, err)
+                    continue
+            except httpx.HTTPError:
+                log.warning("pin %s folder gone; restore + recheck failed; will retry", mid)
+                continue
+            log.warning("dropping pin %s (folder + model both gone): %s", mid, err)
+        del state.pins[mid]
+        changed = True
+    if changed:
         save_pins(state.pins)
     by_id = {w.id: w for w in workers}
     for pin in state.pins.values():
@@ -559,6 +635,8 @@ async def _gpustack_watch_loop(resource: str) -> None:
                     state.wake.set()
         except asyncio.CancelledError:
             raise
+        except httpx.ReadTimeout:
+            continue  # healthy-but-quiet stream hit the read timeout: reconnect now
         except Exception:
             await asyncio.sleep(backoff)  # stream died / unsupported; reconnect
             backoff = min(300, backoff * 2)
@@ -592,7 +670,7 @@ def _ensure_event_watchers(workers: list[Worker], managed_ids: set[int]) -> None
     node's IP changes, cancelled when the node leaves the managed set."""
     want = {w.id: w for w in workers if w.id in managed_ids and w.syncable}
     for wid, (ip, task) in list(state.ev_tasks.items()):
-        if wid not in want or want[wid].ip != ip:
+        if wid not in want or want[wid].ip != ip or task.done():  # done = crashed; recreate below
             task.cancel()
             del state.ev_tasks[wid]
     for wid, w in want.items():
@@ -630,6 +708,11 @@ async def userscript(request: Request) -> Response:
     Open (it carries no secret); placeholders filled from the request + config so
     @match/@connect/API base are correct for wherever the orchestrator is reached."""
     api = str(request.base_url).rstrip("/")
+    # The Host header is reflected into the served JS ('__API__' string literal
+    # and // @connect line): allow only URL-safe chars so a crafted Host can't
+    # break out of the literal (reflected-JS / cache-poisoning hardening).
+    if not re.fullmatch(r"[A-Za-z0-9._\-:\[\]/]+", api):
+        raise HTTPException(status_code=400, detail="bad host")
     gp = urlparse(settings.gpustack_url)
     js = (
         USERSCRIPT.replace("__API__", api)
@@ -862,7 +945,8 @@ async def status() -> list[dict[str, Any]]:
     workers = await state.gpustack.workers()
     folders = await state.gpustack.model_folders()
     exp = {f.path: f.size for f in folders}
-    rows = await collect_status(dict(state.plan), workers, client_for)  # snapshot
+    # snapshot plan; dev_ids enables the peer-view fallback for unreachable nodes
+    rows = await collect_status(dict(state.plan), workers, client_for, state.dev_ids)
     # clean = Syncthing-verified self-consistent copy; expected_bytes = GPUStack's
     # weights-only size (shown for reference, not used to judge integrity).
     return [{**r.__dict__, "expected_bytes": exp.get(r.path, 0), "clean": r.clean} for r in rows]
@@ -900,8 +984,9 @@ async def net() -> dict[int, dict[str, Any]]:
                 continue
             if c.get("connected"):
                 connected += 1
-            in_tot += int(c.get("inBytesTotal") or 0)
-            out_tot += int(c.get("outBytesTotal") or 0)
+            # safe coercion: a non-numeric counter from one node must not 500 /net
+            in_tot += _num(c.get("inBytesTotal"))
+            out_tot += _num(c.get("outBytesTotal"))
         totals[w.id] = (connected, in_tot, out_tot)
     out: dict[int, dict[str, Any]] = {}
     live = {w.id for w in workers}
@@ -962,13 +1047,23 @@ async def pin(body: PinIn) -> dict[str, Any]:
             await state.gpustack.set_model_selector(body.model_id, {label: "true"})
         except httpx.HTTPError as e:
             return {"ok": False, "error": f"selector update failed: {e}"}
+        workers = await state.gpustack.workers()
+        old = state.pins.get(str(body.model_id))
+        if old and old.get("label") != label:  # re-pin to a new path: old label is orphaned
+            for w in workers:
+                if old.get("label") in w.labels:
+                    labels = {k: v for k, v in w.labels.items() if k != old.get("label")}
+                    with contextlib.suppress(httpx.HTTPError):
+                        await state.gpustack.set_worker_labels(w.id, labels)
+                        w.labels = labels  # keep in-memory view consistent for _sync_pins below
         state.pins[str(body.model_id)] = {
             "path": body.path,
             "label": label,
-            "prev_selector": m.get("worker_selector") or {},
+            # Re-pin keeps the ORIGINAL selector: the model's current selector is
+            # the previous pin's label and must never become the restore target.
+            "prev_selector": (old.get("prev_selector") if old else m.get("worker_selector")) or {},
         }
         save_pins(state.pins)
-        workers = await state.gpustack.workers()
         await _sync_pins(workers, have)
     return {"ok": True, "label": label, "holders": sorted(have[body.path])}
 
@@ -985,20 +1080,9 @@ async def unpin(body: UnpinIn) -> dict[str, Any]:
         if pin_rec is None:
             return {"ok": False, "error": "model not pinned"}
         save_pins(state.pins)
-        try:
-            await state.gpustack.set_model_selector(
-                body.model_id, pin_rec.get("prev_selector") or {}
-            )
-        except httpx.HTTPError as e:
-            return {"ok": False, "error": f"selector restore failed: {e} (pin removed)"}
-        # Strip the now-orphaned pin label off every worker that carries it.
-        label = pin_rec.get("label")
-        for w in await state.gpustack.workers():
-            if label in w.labels:
-                with contextlib.suppress(httpx.HTTPError):
-                    await state.gpustack.set_worker_labels(
-                        w.id, {k: v for k, v in w.labels.items() if k != label}
-                    )
+        err = await _release_pin(body.model_id, pin_rec, await state.gpustack.workers())
+        if err:
+            return {"ok": False, "error": f"{err} (pin removed)"}
     return {"ok": True}
 
 
@@ -1064,8 +1148,25 @@ async def events() -> StreamingResponse:
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
+_TOKEN_RE = re.compile(r"token=[^&\s]*")
+
+
+class _RedactTokenFilter(logging.Filter):
+    """Mask the /events ?token= value in uvicorn access-log lines: EventSource
+    forces query-param auth there, and the token must never land in logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                _TOKEN_RE.sub("token=***", a) if isinstance(a, str) else a
+                for a in record.args
+            )
+        return True
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
+    logging.getLogger("uvicorn.access").addFilter(_RedactTokenFilter())
     # Fail closed: an unauthenticated API may only bind loopback. Refuse to start
     # open on a routable interface (the mutating-cluster-control footgun).
     loopback = {"127.0.0.1", "::1", "localhost"}

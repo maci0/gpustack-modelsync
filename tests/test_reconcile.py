@@ -3,7 +3,7 @@
 import httpx
 
 from modelsync.gpustack import Worker
-from modelsync.reconcile import choose_source, folder_id, reconcile
+from modelsync.reconcile import choose_source, collect_status, folder_id, reconcile
 
 
 class FakeSync:
@@ -194,3 +194,33 @@ def testchoose_source_prefers_clean_then_confirmed():
     assert choose_source([1, 2], {2}, {1: dirty, 2: dirty}) == 2
     # nobody has data -> None
     assert choose_source([1, 2], set(), {1: None, 2: None}) is None
+
+async def test_no_source_blip_keeps_existing_folder_wiring():
+    # transient no-source pass (nobody has data, empty have) for a path still in
+    # the plan: GC must NOT tear down an already-wired folder (would abort an
+    # in-flight transfer and strand the path).
+    path = "/c/m"
+    fid = folder_id(path)
+    workers = [W(1), W(2)]
+    fakes = {1: FakeSync("DEV1", compl=0, preset=[fid]), 2: FakeSync("DEV2", compl=0)}
+    _unreachable, warnings = await reconcile({path: {1, 2}}, workers, make(fakes), have={})
+    assert fakes[1].deleted == []                     # folder survives the blip
+    assert any("no source" in w for w in warnings)    # still surfaced
+
+async def test_collect_status_peer_view_success():
+    # node 1's own GUI is down, but peer 2 reports its completion -> a
+    # 'remote-view' row with the peer-reported percentage, not blind unreachable.
+    class Down:
+        async def folder_status(self, fid):
+            raise httpx.HTTPError("down")
+
+    class Peer(FakeSync):
+        async def remote_completion(self, fid, dev):
+            assert dev == "DEV1-ID"
+            return 42.0
+
+    fakes = {1: Down(), 2: Peer("DEV2")}
+    rows = await collect_status({"/c/m": {1, 2}}, [W(1), W(2)],
+                                lambda w: fakes[w.id], {1: "DEV1-ID"})
+    row1 = next(r for r in rows if r.worker_id == 1)
+    assert row1.state == "remote-view" and row1.completion == 42.0

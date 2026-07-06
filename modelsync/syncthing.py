@@ -114,7 +114,9 @@ class SyncthingClient:
         )
         r.raise_for_status()
         d = r.json()
-        return d if isinstance(d, list) else []
+        # dict-only entries: a poison element would dead-loop the caller's
+        # event watcher (its `since` cursor never advances past it).
+        return [e for e in d if isinstance(e, dict)] if isinstance(d, list) else []
 
     async def put_device(self, device_id: str, name: str, address: str) -> None:
         await self._req(

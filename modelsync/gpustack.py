@@ -9,7 +9,7 @@ import os
 from typing import Any, AsyncIterator
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 log = logging.getLogger("modelsync.gpustack")
 
@@ -156,8 +156,8 @@ class GPUStackClient:
                 log.warning("worker %s ip %s outside allowed CIDRs, skipping", wid, ip)
                 continue
             gpu = _gpu_summary(w.get("status"))
-            by_id[wid] = (
-                Worker(
+            try:
+                by_id[wid] = Worker(
                     id=wid,
                     name=w.get("name") or w.get("hostname") or str(wid),
                     ip=ip,
@@ -171,7 +171,9 @@ class GPUStackClient:
                     worker_version=w.get("worker_version"),
                     **gpu,
                 )
-            )
+            except ValidationError:
+                # One malformed worker must not blind us to the whole cluster.
+                log.warning("worker %s has malformed fields, skipping", wid)
         return list(by_id.values())
 
     async def model_folders(self) -> list[ModelFolder]:
@@ -191,11 +193,17 @@ class GPUStackClient:
                 continue
             nodes.setdefault(path, set())
             pending.setdefault(path, set())
-            wid = mf.get("worker_id")
+            wid = _int_or_none(mf.get("worker_id"))  # non-int wid must not crash ModelFolder
             bucket = size_bw.setdefault(path, {})
             key = wid if wid is not None else -1
             bucket[key] = bucket.get(key, 0) + _int(mf.get("size"))  # safe: malformed size -> 0
-            spec.setdefault(path, {k: mf[k] for k in _SPEC_KEYS if mf.get(k)})
+            # str-only spec values: a wrong-typed field would fail ModelFolder
+            # validation and take down the whole folder listing. Only a NON-EMPTY
+            # spec may win the setdefault — a bare record seen first must not
+            # lock in {} and permanently block registration for the path.
+            sp = {k: v for k in _SPEC_KEYS if isinstance(v := mf.get(k), str) and v}
+            if sp:
+                spec.setdefault(path, sp)
             if wid is not None:
                 # A file GPUStack is still downloading must never make its node a
                 # holder/source (we'd replicate a partial copy cluster-wide).
@@ -224,21 +232,16 @@ class GPUStackClient:
                 return mid if isinstance(mid, int) else None
         return None
 
-    async def models(self) -> list[dict[str, Any]]:
-        """Model deployments (id, name, source spec, worker_selector) — for
-        matching a synced folder to the Models that serve it (pin)."""
-        out = []
-        for m in await self._list(f"{self._v}/models"):
-            if isinstance(m, dict) and isinstance(m.get("id"), int):
-                out.append(m)
-        return out
-
     async def get_model(self, model_id: int) -> dict[str, Any] | None:
+        """None = the model does NOT exist (404). Any other failure raises —
+        an outage must never read as 'gone'."""
         try:
             d = await self._get(f"{self._v}/models/{model_id}")
             return d if isinstance(d, dict) else None
-        except httpx.HTTPError:
-            return None
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                return None
+            raise
 
     async def set_model_selector(self, model_id: int, selector: dict[str, str]) -> None:
         """Fetch-mutate-put: only worker_selector changes, everything else kept."""
@@ -290,14 +293,17 @@ class GPUStackClient:
             return []
         out = []
         for mi in items:
-            out.append(
-                ModelInstance(
-                    model_id=mi.get("model_id"),
-                    worker_id=mi.get("worker_id"),
-                    state=mi.get("state"),
-                    local_dir=_instance_dir(mi),
+            try:
+                out.append(
+                    ModelInstance(
+                        model_id=mi.get("model_id"),
+                        worker_id=mi.get("worker_id"),
+                        state=mi.get("state"),
+                        local_dir=_instance_dir(mi),
+                    )
                 )
-            )
+            except ValidationError:
+                continue  # cosmetic data: drop the malformed row, keep the rest
         return out
 
     async def watch(self, resource: str) -> AsyncIterator[bytes]:
@@ -307,7 +313,10 @@ class GPUStackClient:
             f"{self._base}{self._v}/{resource}",
             headers=self._headers,
             params={"watch": "true"},
-            timeout=None,
+            # Finite read timeout: a silently dead connection (NAT drop) must be
+            # torn down so the watcher reconnects, not hang forever. 5 min idle
+            # just triggers a cheap reconnect in the caller's retry loop.
+            timeout=httpx.Timeout(15, read=300),
         ) as r:
             r.raise_for_status()
             async for line in r.aiter_lines():
@@ -329,13 +338,24 @@ class GPUStackClient:
             timeout=15,
         )
         r.raise_for_status()
-        return r.json().get("id")
+        # Untrusted response shape: a non-dict body or non-int id must degrade to
+        # None (caller logs "possible orphan"), not crash or poison the registry.
+        d = r.json()
+        mid = d.get("id") if isinstance(d, dict) else None
+        return mid if isinstance(mid, int) and not isinstance(mid, bool) else None
 
     async def get_model_file(self, model_file_id: int) -> dict[str, Any] | None:
+        """None = the record does NOT exist (404). Any other failure raises.
+        The caller deletes its registry entry on None — a transient outage
+        conflated with 404 would forget the mapping and leak the GPUStack
+        record forever (nothing left to deregister it)."""
         try:
-            return await self._get(f"{self._v}/model-files/{model_file_id}")
-        except httpx.HTTPError:
-            return None
+            d = await self._get(f"{self._v}/model-files/{model_file_id}")
+            return d if isinstance(d, dict) else None
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                return None
+            raise
 
     async def delete_model_file(self, model_file_id: int, cleanup: bool = False) -> None:
         """Delete the model-file record; cleanup=True also removes the files on

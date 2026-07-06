@@ -139,7 +139,7 @@ const $=id=>document.getElementById(id);
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const cluster=()=>$('cluster').value;
 const vNodes=()=>nodes.filter(n=>String(n.cluster_id)===cluster());
-const gib=b=>b?(b/1073741824).toFixed(b>1073741824?0:1)+'G':'0G';
+const gib=b=>b?(b/1073741824).toFixed(b>=1073741824?0:1)+'G':'0G';
 // key-membership, NOT truthiness: an empty edit ([] = remove from ALL nodes) is
 // a real selection and must not fall back to the server plan.
 const selOf=m=>(m.path in edits)?edits[m.path]:m.nodes;
@@ -244,7 +244,13 @@ function render(){
 function rowOf(el){return el.closest('tr');}
 function recordRow(tr){  // read the row's boxes into edits; no-op edits self-clear
   const path=tr.dataset.path;
-  edits[path]=[...tr.querySelectorAll('input[data-n]')].filter(c=>c.checked).map(c=>+c.dataset.n);
+  // preserve planned nodes on OTHER clusters (columns not shown now): editing a
+  // row while viewing one cluster must not silently drop another cluster's copies
+  const vis=new Set(vNodes().map(n=>n.id));
+  const m=models.find(x=>x.path===path);
+  const keep=m?selOf(m).filter(id=>!vis.has(id)):[];
+  const ticked=[...tr.querySelectorAll('input[data-n]')].filter(c=>c.checked).map(c=>+c.dataset.n);
+  edits[path]=[...new Set([...keep,...ticked])];
   pruneEdits();
 }
 function syncBulk(){  // row-all + col-all reflect current selection (indeterminate when mixed)
@@ -299,17 +305,19 @@ async function reset(path){
 }
 let rates={};  // cell -> {t,need,bps} : client-side transfer rate from poll deltas
 let unre={};   // cell -> consecutive unreachable polls (debounce restart blips)
+let netPolling=false;
 async function poll(){
   if(polling)return;               // no pile-up if /status is slow
   polling=true;
   try{
+    if(!netPolling){netPolling=true;  // /net walks every node server-side: never overlap
     jget('/net').then(net=>{  // real Syncthing rates per node (best-effort)
       document.querySelectorAll('[data-net]').forEach(el=>{
         const d=net[el.dataset.net];
         el.textContent=d&&(d.in_bps>1e4||d.out_bps>1e4)
           ?`⇣${(d.in_bps/1048576).toFixed(1)} ⇡${(d.out_bps/1048576).toFixed(1)} MB/s`:'';
       });
-    }).catch(()=>{});
+    }).catch(()=>{}).finally(()=>{netPolling=false;});}
     const st=await jget('/status'); statusMap={};
     st.forEach(s=>{const k=s.path+'@'+s.worker_id;
       if(s.state==='unreachable')unre[k]=(unre[k]||0)+1; else delete unre[k];});
@@ -322,6 +330,10 @@ async function poll(){
         rates[k]={t:now,need:s.need_bytes,bps:p.bps?0.6*bps+0.4*p.bps:bps};  // EMA smooth
       }else rates[k]={t:now,need:s.need_bytes,bps:p&&s.need_bytes===p.need?p.bps:0};
     });
+    // prune keys for rows no longer reported (plan changes) so a long-lived tab
+    // doesn't grow these maps forever
+    Object.keys(rates).forEach(k=>{if(!(k in statusMap))delete rates[k];});
+    Object.keys(unre).forEach(k=>{if(!(k in statusMap))delete unre[k];});
     lastPoll=now;
     paint();
   }catch(e){}finally{ polling=false; }
@@ -342,7 +354,11 @@ function tickAge(){
 function updateStats(){
   const ns=vNodes(), ready=ns.filter(n=>n.state==='ready').length;
   const hardUnre=s=>s.state==='unreachable'&&(unre[s.path+'@'+s.worker_id]||0)>=2;
-  const vals=Object.values(statusMap);
+  // status rows span ALL clusters; count only the cluster in view so the
+  // syncing/errors totals match the visible matrix (else they alarm on rows the
+  // operator can't see).
+  const visIds=new Set(ns.map(n=>n.id));
+  const vals=Object.values(statusMap).filter(s=>visIds.has(s.worker_id));
   const syncing=vals.filter(s=>!s.complete&&!s.errors&&s.state!=='unreachable').length;
   const errs=vals.filter(s=>s.errors>0||hardUnre(s)).length;  // debounced: no restart-blip alarm
   const pend=Object.keys(edits).length;
@@ -473,7 +489,7 @@ USERSCRIPT = r"""// ==UserScript==
 'use strict';
 const API='__API__';
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const gib=b=>b?(b/1073741824).toFixed(b>1073741824?0:1)+'G':'0G';
+const gib=b=>b?(b/1073741824).toFixed(b>=1073741824?0:1)+'G':'0G';
 const mk=(t,c,h)=>{const e=document.createElement(t);if(c)e.className=c;if(h!=null)e.innerHTML=h;return e;};
 function tok(){let t=GM_getValue('token','');if(!t){t=prompt('Model Sync auth token:')||'';GM_setValue('token',t);}return t;}
 function gm(method,path,body){return new Promise((res,rej)=>{GM_xmlhttpRequest({method,url:API+path,
@@ -569,7 +585,17 @@ function paint(){
 }
 async function poll(){if(polling)return;polling=true;try{const st=await gm('GET','/status');stat={};st.forEach(s=>stat[s.path+'@'+s.worker_id]=s);paint();}catch(e){}finally{polling=false;}}
 async function doApply(){
-  const plan={};body.querySelectorAll('input[data-n]:checked').forEach(c=>{(plan[c.dataset.m]=plan[c.dataset.m]||[]).push(+c.dataset.n);});
+  // Build the plan from the ticks IN VIEW, but PRESERVE planned nodes that
+  // belong to other clusters (not rendered now) — else applying while viewing
+  // one cluster would drop every other cluster's copies (unshare + deregister).
+  const vis=new Set(vn().map(n=>n.id));
+  const ticked={};body.querySelectorAll('input[data-n]:checked').forEach(c=>{(ticked[c.dataset.m]=ticked[c.dataset.m]||[]).push(+c.dataset.n);});
+  const plan={};
+  models.forEach(m=>{
+    const keep=m.nodes.filter(id=>!vis.has(id));      // other-cluster plan entries
+    const sel=[...new Set([...keep,...(ticked[m.path]||[])])];
+    if(sel.length)plan[m.path]=sel;
+  });
   let rem=0;models.forEach(m=>m.nodes.forEach(id=>{if(!(plan[m.path]||[]).includes(id))rem++;}));
   if(rem&&!confirm('Remove '+rem+' cop'+(rem===1?'y':'ies')+'? (unshares + deregisters; files stay on disk)'))return;
   setMsg('applying…');
