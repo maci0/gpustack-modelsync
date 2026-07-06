@@ -219,6 +219,8 @@ no GPUStack fork). Install from the orchestrator's **LAN-reachable** URL (not
 Tampermonkey → Create/Install from URL → http://<orchestrator-host>:8585/userscript.js
 ```
 
+![Model Sync drawer inside the GPUStack dashboard](docs/screenshots/userscript-dashboard.png)
+
 It adds a floating **↻ Model Sync** button on the GPUStack pages (`@match` is set
 to your `GPUSTACK_URL` origin). Click → a drawer with the model×node matrix. It
 calls the orchestrator via `GM_xmlhttpRequest` (bypasses CORS), prompting once
