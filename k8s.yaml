@@ -42,6 +42,15 @@ spec:
                 secretKeyRef: { name: modelsync, key: syncthing-api-key }
           securityContext:
             runAsUser: 0
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            # No memory limit: hashing a large model spikes RSS; an OOM-kill
+            # mid-sync is worse than temporary pressure.
+          livenessProbe:
+            # /rest/noauth/health answers without the API key.
+            httpGet: { path: /rest/noauth/health, port: 8384 }
+            initialDelaySeconds: 10
+            periodSeconds: 30
           volumeMounts:
             - name: model-cache
               mountPath: /var/lib/gpustack/cache
@@ -78,6 +87,17 @@ spec:
           image: gpustack-modelsync:0.1.0
           ports:
             - containerPort: 8585
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          readinessProbe:
+            # /app.js needs no auth token (static asset).
+            httpGet: { path: /app.js, port: 8585 }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /app.js, port: 8585 }
+            initialDelaySeconds: 10
+            periodSeconds: 30
           env:
             - name: MODELSYNC_GPUSTACK_URL
               value: http://gpustack:80
@@ -96,10 +116,21 @@ spec:
             - name: state
               mountPath: /data
       volumes:
-        # plan + registry + members. A PVC keeps automation state across
-        # reschedules; emptyDir is fine if you can re-apply the plan after a move.
+        # plan + registry + members MUST survive reschedules: the plan can be
+        # re-applied by hand, but a lost registry means model-file records we
+        # created in GPUStack are never deregistered (leaked orphans).
         - name: state
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: modelsync-state
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: modelsync-state
+  namespace: gpustack
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 1Gi } }
 ---
 apiVersion: v1
 kind: Service

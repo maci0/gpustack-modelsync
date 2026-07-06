@@ -8,3 +8,10 @@ scripts/
 tests/
 k8s.yaml
 docker-compose.yml
+registry.json
+members.json
+pins.json
+.coverage
+.pytest_cache/
+.ruff_cache/
+.hypothesis/

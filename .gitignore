@@ -3,3 +3,14 @@ __pycache__/
 *.pyc
 plan.json
 .env
+registry.json
+members.json
+pins.json
+*.json.corrupt
+.coverage
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+.demo-state/
+.playwright-mcp/
+demo_state/

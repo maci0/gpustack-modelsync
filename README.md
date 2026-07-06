@@ -15,6 +15,28 @@ GPUStack server ──/v2/workers──▶ orchestrator ──Syncthing REST─�
                                   matrix UI: model × node + sync %
 ```
 
+## Screenshots
+
+The whole tool is one page: a **model × node matrix**. Tick where each model
+should live, hit **Apply**, watch the bars fill. Node headers show GPU, VRAM and
+free disk; cells show live sync %, and badges for **serving** / **ready** /
+**registering** / GPUStack **downloading**.
+
+![Model Sync matrix UI (light)](docs/screenshots/modelsync-ui-light.png)
+
+Automatic dark mode (follows the GPUStack dashboard palette):
+
+![Model Sync matrix UI (dark)](docs/screenshots/modelsync-ui-dark.png)
+
+### Try it without a cluster
+
+A built-in demo boots the orchestrator against a fake GPUStack + fake Syncthing
+serving sample data (loopback only, nothing real is touched):
+
+```bash
+uv run python scripts/demo.py        # then open http://127.0.0.1:18585
+```
+
 ## What it does
 
 - **Static, internet-free discovery.** Peers connect only via the GPUStack node
@@ -241,6 +263,13 @@ The orchestrator mutates GPUStack and reconfigures Syncthing on every node, so:
   instance; move to GPUStack's DB if you want it co-located.
 - **One orchestrator instance.** State files + the reconcile lock assume a
   single replica (k8s Deployment `replicas: 1`); no leader election.
+- **Unshare needs the node reachable.** Reconcile only touches nodes still
+  referenced by the plan/registry, so removing a model from a node that is
+  **unreachable at that moment** deregisters its GPUStack record but can't clean
+  the Syncthing folder config on the node itself; it's left an inert orphan (its
+  peers have already dropped it, so nothing syncs, and the files stay on disk).
+  Re-tick then untick while the node is reachable, or clear it with `⟳` reset,
+  to remove the stale folder.
 
 ## Verification
 
