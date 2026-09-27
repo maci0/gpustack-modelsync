@@ -90,7 +90,7 @@ console.log('ALL-OK');
 def test_shipped_js_pure_helpers(tmp_path):
     f = tmp_path / "harness.js"
     f.write_text(HARNESS + "\n" + SCRIPT + "\n" + ASSERTS)
-    r = subprocess.run([node, str(f)], capture_output=True, text=True, timeout=30)
+    r = subprocess.run([node, str(f)], capture_output=True, text=True, timeout=30, check=False)
     assert r.returncode == 0, f"node failed:\n{r.stdout}\n{r.stderr}"
     assert "ALL-OK" in r.stdout
 
@@ -170,6 +170,6 @@ def test_userscript_apply_preserves_other_cluster_plan(tmp_path):
           .replace("__GP_ORIGIN__", "http://y").replace("__ORCH_HOST__", "y"))
     f = tmp_path / "us_harness.js"
     f.write_text(US_HARNESS + "\n" + us + "\n" + US_DRIVE)
-    r = subprocess.run([node, str(f)], capture_output=True, text=True, timeout=30)
+    r = subprocess.run([node, str(f)], capture_output=True, text=True, timeout=30, check=False)
     assert r.returncode == 0, f"node failed:\n{r.stdout}\n{r.stderr}"
     assert "ALL-OK" in r.stdout

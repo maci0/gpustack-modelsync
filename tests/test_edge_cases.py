@@ -9,10 +9,10 @@ from modelsync.gpustack import (
     _maintenance_on,
     _max_free,
     _model_dir,
-    under_roots,
     free_for_path,
+    under_roots,
 )
-from modelsync.reconcile import choose_source, _is_clean, collect_status, folder_id
+from modelsync.reconcile import _is_clean, choose_source, collect_status, folder_id
 
 
 def W(i, mounts=(), free=None):

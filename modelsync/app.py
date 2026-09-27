@@ -20,7 +20,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 from pydantic import BaseModel
 
 from .config import settings
-from .gpustack import GPUStackClient, ModelFolder, Worker, under_roots, free_for_path
+from .gpustack import GPUStackClient, ModelFolder, Worker, free_for_path, under_roots
 from .reconcile import choose_source, collect_status, folder_id, reconcile
 from .syncthing import SyncthingClient
 from .web import PAGE, SCRIPT, USERSCRIPT
@@ -617,7 +617,7 @@ async def _background_loop() -> None:
             await reconcile_all()
         except asyncio.CancelledError:
             raise
-        except Exception as e:  # never let the loop die
+        except Exception as e:  # noqa: BLE001 - never let the reconcile loop die
             log.warning("reconcile loop error: %s", e)
 
 
@@ -637,8 +637,8 @@ async def _gpustack_watch_loop(resource: str) -> None:
             raise
         except httpx.ReadTimeout:
             continue  # healthy-but-quiet stream hit the read timeout: reconnect now
-        except Exception:
-            await asyncio.sleep(backoff)  # stream died / unsupported; reconnect
+        except Exception:  # noqa: BLE001 - stream died / unsupported; reconnect
+            await asyncio.sleep(backoff)
             backoff = min(300, backoff * 2)
 
 
@@ -661,7 +661,7 @@ async def _syncthing_event_loop(w: Worker) -> None:
                     state.wake.set()
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001 - one bad poll must not kill the watcher
             await asyncio.sleep(10)
 
 
@@ -1142,8 +1142,8 @@ async def events() -> StreamingResponse:
                 yield b"data: reload\n\n"
         except asyncio.CancelledError:
             raise
-        except Exception:
-            yield b"data: reload\n\n"  # nudge the browser to reconnect
+        except Exception:  # noqa: BLE001 - any stream failure: nudge browser to reconnect
+            yield b"data: reload\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 

@@ -7,6 +7,7 @@ device + folder entries to both sides), so peers never need manual accept.
 from __future__ import annotations
 
 from typing import Any
+
 import httpx
 
 # Force every node LAN-only: no global discovery, no relays, no NAT traversal,

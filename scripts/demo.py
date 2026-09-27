@@ -37,8 +37,8 @@ os.environ.update(
     MODELSYNC_RECONCILE_INTERVAL="3",
 )
 
-import uvicorn  # noqa: E402
-from fastapi import FastAPI, Request  # noqa: E402
+import uvicorn
+from fastapi import FastAPI, Request
 
 GB = 1024**3
 CACHE = "/var/lib/gpustack/cache/huggingface"

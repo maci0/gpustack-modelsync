@@ -9,6 +9,7 @@ from hypothesis import strategies as st
 
 import modelsync.app as A
 from modelsync.gpustack import (
+    Worker,
     _as_dir,
     _gpu_summary,
     _instance_dir,
@@ -16,11 +17,10 @@ from modelsync.gpustack import (
     _max_free,
     _model_dir,
     _mounts,
-    under_roots,
     free_for_path,
+    under_roots,
 )
 from modelsync.reconcile import folder_id
-from modelsync.gpustack import Worker
 
 # Arbitrary JSON-ish values: the shape a hostile/buggy API or corrupt file yields.
 json_val = st.recursive(
