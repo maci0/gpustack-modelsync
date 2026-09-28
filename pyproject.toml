@@ -1,6 +1,6 @@
 [project]
 name = "gpustack-modelsync"
-version = "0.1.0"
+version = "0.2.0"
 description = "Sync GPUStack model folders across cluster nodes via Syncthing"
 requires-python = ">=3.11"
 dependencies = [
