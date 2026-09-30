@@ -1,7 +1,7 @@
 """Behavioral tests of the SHIPPED in-page JS (modelsync.web.SCRIPT), run under
-node. The JS was previously only syntax-checked; its load-bearing pure helpers
+bun. The JS was previously only syntax-checked; its load-bearing pure helpers
 (sameSet -> dirty detection, splitPath -> sort/display/purge name, selOf's
-empty-edit semantics, gib) had no behavioral coverage. Skips if node is absent."""
+empty-edit semantics, gib) had no behavioral coverage. Skips if bun is absent."""
 
 import shutil
 import subprocess
@@ -10,7 +10,7 @@ import pytest
 
 from modelsync.web import SCRIPT, USERSCRIPT
 
-node = shutil.which("node")
+bun = shutil.which("bun")
 
 # Minimal DOM/env stubs so SCRIPT loads without a browser. fetch REJECTS, so the
 # bootstrap IIFE (loadNodes/loadModels/poll) no-ops instead of touching the DOM;
@@ -86,12 +86,12 @@ console.log('ALL-OK');
 """
 
 
-@pytest.mark.skipif(node is None, reason="node not installed")
+@pytest.mark.skipif(bun is None, reason="bun not installed")
 def test_shipped_js_pure_helpers(tmp_path):
     f = tmp_path / "harness.js"
     f.write_text(HARNESS + "\n" + SCRIPT + "\n" + ASSERTS)
-    r = subprocess.run([node, str(f)], capture_output=True, text=True, timeout=30, check=False)
-    assert r.returncode == 0, f"node failed:\n{r.stdout}\n{r.stderr}"
+    r = subprocess.run([bun, str(f)], capture_output=True, text=True, timeout=30, check=False)
+    assert r.returncode == 0, f"bun failed:\n{r.stdout}\n{r.stderr}"
     assert "ALL-OK" in r.stdout
 
 
@@ -164,12 +164,12 @@ US_DRIVE = r"""
 """
 
 
-@pytest.mark.skipif(node is None, reason="node not installed")
+@pytest.mark.skipif(bun is None, reason="bun not installed")
 def test_userscript_apply_preserves_other_cluster_plan(tmp_path):
     us = (USERSCRIPT.replace("__API__", "http://x")
           .replace("__GP_ORIGIN__", "http://y").replace("__ORCH_HOST__", "y"))
     f = tmp_path / "us_harness.js"
     f.write_text(US_HARNESS + "\n" + us + "\n" + US_DRIVE)
-    r = subprocess.run([node, str(f)], capture_output=True, text=True, timeout=30, check=False)
-    assert r.returncode == 0, f"node failed:\n{r.stdout}\n{r.stderr}"
+    r = subprocess.run([bun, str(f)], capture_output=True, text=True, timeout=30, check=False)
+    assert r.returncode == 0, f"bun failed:\n{r.stdout}\n{r.stderr}"
     assert "ALL-OK" in r.stdout
